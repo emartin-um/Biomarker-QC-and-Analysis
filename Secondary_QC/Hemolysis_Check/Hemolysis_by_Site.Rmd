@@ -597,7 +597,7 @@ if ("sex" %in% names(df_hemo) && sum(!is.na(df_hemo$sex)) > 50) {
     cat("Insufficient data for Sex × Site analysis (need ≥5 M and F per Site)\n")
   }
 
-  cat("\n## 7.3 Sex Differences Within Each Site\n\n")
+  cat("\n\n## 7.3 Sex Differences Within Each Site\n\n")
 
   sex_by_site <- map_df(sites_for_sex, function(s) {
     site_data <- df_sex %>% filter(Site == s)
@@ -917,7 +917,7 @@ Using HIHG technical replicates to establish baseline (technical) variance for h
 
 ```{r replicate-variance, results='asis', fig.width=10, fig.height=8}
 # Load replicate data
-rep_file <- "../Primary_QC/output_files/hihg_reps_NPQ.csv"
+rep_file <- "../../Primary_QC/output_files/hihg_reps_NPQ.csv"
 
 if (file.exists(rep_file)) {
 
