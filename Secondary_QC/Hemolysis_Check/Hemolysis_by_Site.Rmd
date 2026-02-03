@@ -31,7 +31,7 @@ library(kableExtra)
 
 # Load data - check input_files first, then fall back to Metadata_Merge output
 input_file <- "input_files/filtered_combined_post_QC.csv"
-fallback_file <- "../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
+fallback_file <- "../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
 
 if (file.exists(input_file)) {
   df <- read_csv(input_file, show_col_types = FALSE)

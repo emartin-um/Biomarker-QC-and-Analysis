@@ -30,11 +30,9 @@ library(kableExtra)
 
 # Read filtered files
 filtered_combined <- read_csv("output_files/filtered/filtered_combined_post_QC.csv")
-filtered_standard <- read_csv("output_files/filtered/filtered_standard_post_QC.csv")
 
 cat("Files loaded successfully.\n\n")
 cat("Filtered Combined: ", nrow(filtered_combined), " rows x ", ncol(filtered_combined), " columns\n")
-cat("Filtered Standard: ", nrow(filtered_standard), " rows x ", ncol(filtered_standard), " columns\n")
 ```
 
 ## Verify Source Columns Exist
@@ -49,18 +47,11 @@ cat("=== VERIFYING SOURCE COLUMNS ===\n\n")
 # Check for required columns in combined dataset
 required_cols <- c("APOE", "APOE4", "A_40", "A_42")
 missing_combined <- required_cols[!required_cols %in% names(filtered_combined)]
-missing_standard <- required_cols[!required_cols %in% names(filtered_standard)]
 
 if (length(missing_combined) > 0) {
   cat("WARNING: Missing columns in filtered_combined:", paste(missing_combined, collapse = ", "), "\n")
 } else {
   cat("All required columns present in filtered_combined.\n")
-}
-
-if (length(missing_standard) > 0) {
-  cat("WARNING: Missing columns in filtered_standard:", paste(missing_standard, collapse = ", "), "\n")
-} else {
-  cat("All required columns present in filtered_standard.\n")
 }
 ```
 
@@ -79,20 +70,12 @@ filtered_combined <- filtered_combined %>%
     ABeta42_minus_ABeta40 = A_42 - A_40
   )
 
-# Add derived columns to filtered_standard
-filtered_standard <- filtered_standard %>%
-  mutate(
-    APOE4_minus_APOE = APOE4 - APOE,
-    ABeta42_minus_ABeta40 = A_42 - A_40
-  )
-
 cat("Derived biomarkers added:\n")
 cat("  - APOE4_minus_APOE (APOE4 - APOE)\n")
 cat("  - ABeta42_minus_ABeta40 (A_42 - A_40)\n\n")
 
 cat("Updated dimensions:\n")
 cat("  Filtered Combined: ", nrow(filtered_combined), " rows x ", ncol(filtered_combined), " columns\n")
-cat("  Filtered Standard: ", nrow(filtered_standard), " rows x ", ncol(filtered_standard), " columns\n")
 ```
 
 ## Summary Statistics for Derived Biomarkers
@@ -179,15 +162,12 @@ p1 + p2
 
 # Write updated files (same filenames)
 write_csv(filtered_combined, "output_files/filtered/filtered_combined_post_QC.csv")
-write_csv(filtered_standard, "output_files/filtered/filtered_standard_post_QC.csv")
 
 cat("\n=== FILES UPDATED ===\n\n")
 cat("Updated files written to output_files/filtered/\n\n")
 cat("Files updated:\n")
 cat("  - filtered_combined_post_QC.csv (", nrow(filtered_combined), " rows x ",
     ncol(filtered_combined), " columns)\n")
-cat("  - filtered_standard_post_QC.csv (", nrow(filtered_standard), " rows x ",
-    ncol(filtered_standard), " columns)\n")
 cat("\nNew biomarker columns added:\n")
 cat("  - APOE4_minus_APOE\n")
 cat("  - ABeta42_minus_ABeta40\n")

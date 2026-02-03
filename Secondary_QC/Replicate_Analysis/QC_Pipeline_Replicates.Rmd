@@ -61,7 +61,7 @@ if (!dir.exists("output_files")) dir.create("output_files")
 # Check if input files exist, if not copy from Primary_QC/input_files
 # Note: Replicate_Analysis uses the RAW NPQ file (biomarkers as rows, samples as columns)
 #       NOT the processed post-QC file from Primary_QC/output_files
-primary_qc_input_dir <- "../Primary_QC/input_files"
+primary_qc_input_dir <- "../../Primary_QC/input_files"
 
 # --- NPQ file ---
 # Look for NPQ file in input_files (any file starting with NPQ and ending in .csv)

@@ -603,16 +603,12 @@ cat("## Creating Derived Biomarker Columns\n\n")
 # Check that required columns exist
 required_cols <- c("APOE", "APOE4", "A_40", "A_42")
 missing_combined <- required_cols[!required_cols %in% names(filtered_combined)]
-missing_standard <- required_cols[!required_cols %in% names(filtered_standard)]
 
-if (length(missing_combined) > 0 || length(missing_standard) > 0) {
+if (length(missing_combined) > 0) {
   cat("::: {.callout-warning}\n")
   cat("### Missing Source Columns\n\n")
   if (length(missing_combined) > 0) {
     cat("Missing in filtered_combined: ", paste(missing_combined, collapse = ", "), "\n")
-  }
-  if (length(missing_standard) > 0) {
-    cat("Missing in filtered_standard: ", paste(missing_standard, collapse = ", "), "\n")
   }
   cat(":::\n\n")
 } else {
@@ -623,12 +619,6 @@ if (length(missing_combined) > 0 || length(missing_standard) > 0) {
       ABeta42_minus_ABeta40 = A_42 - A_40
     )
 
-  # Add derived columns to filtered_standard
-  filtered_standard <- filtered_standard %>%
-    mutate(
-      APOE4_minus_APOE = APOE4 - APOE,
-      ABeta42_minus_ABeta40 = A_42 - A_40
-    )
 
   cat("Added two derived biomarker columns:\n\n")
   cat("| Derived Biomarker | Formula |\n")
@@ -637,7 +627,6 @@ if (length(missing_combined) > 0 || length(missing_standard) > 0) {
   cat("| `ABeta42_minus_ABeta40` | A_42 - A_40 |\n\n")
 
   # Overwrite filtered files with new columns
-  write_csv(filtered_standard, file.path(OUTPUT_DIR, "filtered", "filtered_standard_post_QC.csv"))
   write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
 
   cat("Filtered files updated with derived biomarkers.\n\n")
