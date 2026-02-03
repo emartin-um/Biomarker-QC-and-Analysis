@@ -9,8 +9,9 @@ R code for quality control and analysis of Alamar biomarker data for the U19 Alz
 ├── Metadata_Merge/       # Merge biomarker data with metadata
 ├── Secondary_QC/         # Secondary QC analyses
 │   ├── Replicate_Analysis/   # Replicate sample concordance and CV analysis
-│   └── Hemolysis_Check/      # Hemolysis marker analysis by site
-├── U19_Analysis/         # U19 grant-specific association analyses
+│   ├── Hemolysis_Check/      # Hemolysis marker analysis by site
+│   └── APOE/                 # APOE biomarker vs genotype analysis
+├── Analysis/             # Statistical association analyses
 └── Utilities/            # Shared functions and helper scripts
 ```
 
@@ -59,14 +60,25 @@ Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-ana
 
 Open `Secondary_QC/Hemolysis_Check/Hemolysis_Check.Rproj` in RStudio. Data auto-loads from Metadata_Merge output if not in input_files/.
 
-### U19_Analysis
-Statistical analyses specific to the U19 grant objectives, including CDX associations and interaction testing.
+### Secondary_QC/APOE
+Analysis of APOE biomarker levels (APOE4 − APOE derived metric) stratified by APOE genotype to validate assay performance and identify outliers.
+
+**Scripts:**
+- `APOE_exam.qmd` - APOE genotype vs biomarker analysis with outlier detection
+
+**Key outputs:**
+- Boxplots of APOE4−APOE by genotype
+- Outlier identification (3×IQR threshold)
+- `APOE4_minus_APOE_extreme_outliers_by_genotype.csv`
+
+### Analysis
+Statistical association analyses including CDX associations and interaction testing.
 
 **Scripts:**
 - `Assoc_Analysis_univariate_HighBiomarkers_12_19_25.Rmd` - Univariate association tests
 - `Assoc_Analysis_Interaction_HighBiomarkers_12_31_25_1.Rmd` - CDX interaction analyses
 
-Open `U19_Analysis/U19_Analysis.Rproj` in RStudio.
+Open `Analysis/U19_Analysis.Rproj` in RStudio.
 
 ### Utilities
 Shared R functions used across projects.
@@ -91,7 +103,10 @@ The recommended analysis order is:
 3. Secondary_QC/Hemolysis_Check (optional, recommended before association analyses)
    └── Produces: hemolysis index, outlier flags, biomarker hemolysis assessment
 
-4. U19_Analysis
+4. Secondary_QC/APOE (optional, validates APOE assay performance)
+   └── Produces: genotype-stratified plots, outlier list
+
+5. Analysis
    a. Univariate analysis first
       └── Produces: biomarker_groups.csv, meta_plus_race_dx.csv
    b. Interaction analysis second

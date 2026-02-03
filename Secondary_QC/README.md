@@ -27,6 +27,17 @@ Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-ana
 - Covariate associations
 - Outlier detection flags
 
+### APOE/
+Analysis of APOE biomarker levels (APOE4 − APOE derived metric) stratified by APOE genotype to validate assay performance and identify samples with discordant biomarker/genotype results.
+
+**Scripts:**
+- `APOE_exam.qmd` - APOE genotype vs biomarker analysis
+
+**Key outputs:**
+- Boxplots of APOE4−APOE by genotype
+- Extreme outliers by genotype (3×IQR threshold)
+- `APOE4_minus_APOE_extreme_outliers_by_genotype.csv`
+
 ## Workflow
 
 These analyses can be run after Primary_QC:
@@ -35,7 +46,8 @@ These analyses can be run after Primary_QC:
 Primary_QC
 ├── Replicate_Analysis (can run directly after Primary_QC)
 └── Metadata_Merge
-    └── Hemolysis_Check (requires merged data)
+    ├── Hemolysis_Check (requires merged data)
+    └── APOE (requires merged data with genotype info)
 ```
 
 ## Getting Started

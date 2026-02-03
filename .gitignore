@@ -28,5 +28,9 @@
 # Generated plot files
 Rplots.pdf
 
+# Analysis output files (regenerated from source scripts)
+**/*.csv
+**/*.xlsx
+
 # Dataset-specific notes (not tracked - each dataset has its own)
 notes.md

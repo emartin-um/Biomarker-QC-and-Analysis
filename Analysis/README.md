@@ -1,12 +1,12 @@
-# U19 Analysis
+# Analysis
 
-Statistical analyses specific to the U19 grant objectives, including biomarker association testing with clinical diagnosis (CDX), covariate effects, and interaction analyses.
+Statistical analyses for biomarker association testing with clinical diagnosis (CDX), covariate effects, and interaction analyses.
 
 > **Note:** These scripts now use the unified data pipeline from `Metadata_Merge/` and shared functions from `Utilities/shared_functions.R`.
 
 ## Usage
 
-1. Open `U19_Analysis.Rproj` in RStudio
+1. Open `Analysis.Rproj` in RStudio
 2. **Preferred:** Run `Metadata_Merge/` pipeline first, then copy output to `input_files/`
 3. Alternatively, place raw input files in `input_files/` (scripts have fallback loading)
 4. Run analysis scripts in order (univariate first, then interaction)
@@ -123,7 +123,7 @@ Metadata_Merge/output_files/filtered/
     +-- filtered_combined_post_QC.csv
     |
     v
-U19_Analysis/input_files/ (copy or symlink)
+Analysis/input_files/ (copy or symlink)
     |
     v
 [1. Run Assoc_Analysis_univariate.Rmd]
@@ -135,7 +135,7 @@ U19_Analysis/input_files/ (copy or symlink)
 [2. Run Assoc_Analysis_Interaction.Rmd]
     |
     v
-U19_Analysis/output_files/
+Analysis/output_files/
 ```
 
 **Alternative (Legacy) Workflow:**
@@ -143,7 +143,7 @@ U19_Analysis/output_files/
 Primary_QC/output_files/ + External metadata
     |
     v
-U19_Analysis/input_files/
+Analysis/input_files/
     |
     +-- NPQ_post_QC.csv
     +-- U19_Alamar_metadata.csv
