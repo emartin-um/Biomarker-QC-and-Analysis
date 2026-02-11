@@ -15,7 +15,27 @@ R code for quality control and analysis of Alamar biomarker data for the U19 Alz
 └── Utilities/            # Shared functions and helper scripts
 ```
 
-> **Note:** The `Clustering/` folder (PCA and clustering analyses) is under active development and available on the `clustering-dev` branch.
+> **Note:** Development projects live on dedicated `dev/*` branches. See [Development Branches](#development-branches) below.
+
+## Development Branches
+
+Projects under active development live on dedicated branches, not on `main`. When a project is production-ready, it merges into `main`.
+
+| Branch | Project | Description |
+|--------|---------|-------------|
+| `dev/mci-progression` | MCI Progression Analysis | Composite biomarker scores, elastic net, clustering for MCI progression |
+| `dev/clustering` | Clustering | PCA, dimensionality reduction, metadata association analysis |
+
+To work on a development project:
+```bash
+git checkout dev/project-name
+```
+
+To create a new development project:
+```bash
+git checkout -b dev/your-project-name main
+mkdir -p In_Development/YourProject
+```
 
 ## Projects
 
@@ -113,7 +133,7 @@ The recommended analysis order is:
       └── Produces: association results, interaction plots
 ```
 
-> **Clustering analyses** (PCA, outlier detection) are under development on the `clustering-dev` branch.
+> **Development projects** are available on their respective `dev/*` branches (see [Development Branches](#development-branches) above).
 
 ## Getting Started
 
