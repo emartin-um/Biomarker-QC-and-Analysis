@@ -32,5 +32,8 @@ Rplots.pdf
 **/*.csv
 **/*.xlsx
 
+# Old/archived files
+/old/
+
 # Dataset-specific notes (not tracked - each dataset has its own)
 notes.md
