@@ -13,6 +13,9 @@ format:
 params:
   filter_only: false
   no_copy: false
+  include_derived_covariates: true
+  include_derived_biomarkers: false
+  filter_na_covars: true
 editor: visual
 ---
 
@@ -32,9 +35,15 @@ NPQ_STANDARD_FILE <- "NPQ_post_QC.csv"
 NPQ_LOW_FILE <- "NPQ_Low_post_QC.csv"
 NPQ_DATE_PATTERN <- NULL  # Set to specific date or NULL for auto-detect
 
-# Get parameters (can be set when rendering)
-FILTER_ONLY <- params$filter_only
-NO_COPY <- params$no_copy
+# Get parameters (set in YAML)
+FILTER_ONLY              <- params$filter_only
+NO_COPY                  <- params$no_copy
+INCLUDE_DERIVED_COVARS   <- params$include_derived_covariates
+INCLUDE_DERIVED_BIOMARKS <- params$include_derived_biomarkers
+FILTER_NA_COVARS         <- params$filter_na_covars
+
+# Covariate explorer (config-driven grouping and exploration utilities)
+source("covariate_explorer.R")
 
 # Create output directory if needed
 if (!dir.exists(OUTPUT_DIR)) dir.create(OUTPUT_DIR)
@@ -48,10 +57,13 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 **Pipeline Steps:**
 
 1.  **Input Files** - Verify/copy post-QC files from Primary_QC
-2.  **Merge Data** - Merge biomarker data with metadata
+2.  **Merge Data** - Merge biomarker data with metadata (APOE.geno normalized to `"a/b"` format)
 3.  **Quality Control** - Identify duplicates, implausible values, and issues
 4.  **Apply Filters** - Create final analysis-ready datasets
-5.  **Add Derived Biomarkers** - Create APOE4_minus_APOE and ABeta42_minus_ABeta40 columns
+5.  **Exclusion Summary** - Review filtered sample counts
+6.  **Covariate Groupings** *(optional: `include_derived_covariates`, default TRUE)* — explore distributions (6a), define configs (6b), preview decisions (6c), apply + validate + filter (6d); produces CDX_collapsed, Ancestry, APOE4_carrier, APOE4_count; rows excluded by default when either covariate is NA (`filter_na_covars`)
+7.  **Derived Biomarkers** *(optional: `include_derived_biomarkers`, default FALSE)* - APOE4_minus_APOE, ABeta42_minus_ABeta40
+8.  **Save RDS** - Write `preprocessed_data.rds` with data + biomarker_cols
 
 ```{r}
 #| label: mode-display
@@ -162,7 +174,19 @@ if (!FILTER_ONLY) {
   metadata <- read_csv(metadata_file, show_col_types = FALSE)
   metadata <- metadata %>%
     rename(APOE.geno = APOE) %>%
-    mutate(Group_Race_Ethnicity = paste(Group, Race, Ethnicity, sep = "_"))
+    mutate(
+      # Normalize APOE.geno to "a/b" digit format (e.g. "E3    E4" -> "3/4")
+      APOE.geno = case_when(
+        is.na(APOE.geno) ~ NA_character_,
+        TRUE ~ paste0(str_extract(APOE.geno, "\\d"),
+                      "/",
+                      str_extract(APOE.geno, "\\d$"))
+      ),
+      Group_Race_Ethnicity = paste(Group, Race, Ethnicity, sep = "_")
+    )
+
+  # Capture metadata column names before merging (used later to identify biomarker cols)
+  metadata_cols_captured <- names(metadata)
 
   # Load biomarker files
   biomarkers_postQC <- read_csv(file.path(INPUT_DIR, NPQ_STANDARD_FILE), show_col_types = FALSE)
@@ -173,6 +197,12 @@ if (!FILTER_ONLY) {
     rename_with(~str_replace_all(., "[^A-Za-z0-9_]", "_"))
   biomarkers_low_postQC <- biomarkers_low_postQC %>%
     rename_with(~str_replace_all(., "[^A-Za-z0-9_]", "_"))
+} else {
+  # In filter_only mode: capture metadata cols from the metadata file directly
+  meta_tmp <- read_csv(metadata_file, show_col_types = FALSE)
+  meta_tmp <- meta_tmp %>% rename(APOE.geno = APOE)
+  metadata_cols_captured <- c(names(meta_tmp), "Group_Race_Ethnicity")
+  rm(meta_tmp)
 }
 ```
 
@@ -591,77 +621,259 @@ cat("| Low | ", nrow(merged_low), " | ", nrow(filtered_low), " | ", nrow(merged_
 cat("| Combined | ", nrow(merged_combined), " | ", nrow(filtered_combined), " | ", nrow(merged_combined) - nrow(filtered_combined), " |\n", sep = "")
 ```
 
-# Step 6: Add Derived Biomarkers {#step6}
+# Step 6: Covariate Groupings {#step6}
+
+## Step 6a: Explore Distributions
 
 ```{r}
-#| label: step6-derived-biomarkers
+#| label: step6a-explore
 #| echo: false
 #| results: asis
 
-cat("## Creating Derived Biomarker Columns\n\n")
+if (INCLUDE_DERIVED_COVARS) {
+  cat("Review these distributions to inform your grouping decisions in Step 6b.\n\n")
 
-# Check that required columns exist
-required_cols <- c("APOE", "APOE4", "A_40", "A_42")
-missing_combined <- required_cols[!required_cols %in% names(filtered_combined)]
+  cat("### CDX (Diagnosis)\n\n")
+  explore_covariate(filtered_combined, "CDX") %>%
+    kable(col.names = c("CDX", "N", "Pct")) %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+    print()
 
-if (length(missing_combined) > 0) {
-  cat("::: {.callout-warning}\n")
-  cat("### Missing Source Columns\n\n")
-  if (length(missing_combined) > 0) {
-    cat("Missing in filtered_combined: ", paste(missing_combined, collapse = ", "), "\n")
-  }
-  cat(":::\n\n")
+  cat("\n### Group × Race × Ethnicity Combinations\n\n")
+  explore_combinations(filtered_combined, "Group", "Race", "Ethnicity") %>%
+    kable() %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+    print()
 } else {
-  # Add derived columns to filtered_combined
+  cat("*Skipped (include_derived_covariates = FALSE)*\n\n")
+}
+```
+
+## Step 6b: Define Grouping Configs
+
+```{r}
+#| label: step6b-configs
+
+if (INCLUDE_DERIVED_COVARS) {
+
+  # ── EDIT THIS BLOCK FOR EACH NEW DATASET ───────────────────────────────────
+
+  dx_config <- make_category_config(
+    source_col = "CDX",
+    target_col = "CDX_collapsed",
+    keep     = c("NCI", "MCI", "AD"),
+    collapse = list(
+      "Dementia_Other" = c("Dementia Undetermined", "Dementia Vascular", "Dementia Other")
+    ),
+    exclude  = c("0", "Other", "Insufficient Data")
+  )
+
+  ancestry_config <- make_grouping_config(
+    target_col    = "Ancestry",
+    other_label   = "Other",
+    exclude_other = FILTER_NA_COVARS,
+    rules = list(
+      "HI_WH" = list(Group = "HI", Race = "WH"),
+      "HI_MU" = list(Group = "HI", Race = "MU"),
+      "HI_MU" = list(Group = "HI", Race = "BL WH"),
+      "HI_BL" = list(Group = "HI", Race = "BL"),
+      "HI_BL" = list(Group = "AA", Ethnicity = "HI"),
+      "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "BL"),
+      "AFDC"  = list(Group = "AFDC")
+    )
+  )
+
+  # ───────────────────────────────────────────────────────────────────────────
+
+  print_config(dx_config)
+  print_config(ancestry_config)
+}
+```
+
+## Step 6c: Preview Decisions
+
+```{r}
+#| label: step6c-preview
+#| echo: false
+#| results: asis
+
+if (INCLUDE_DERIVED_COVARS) {
+  cat("### Diagnosis (CDX → CDX_collapsed)\n\n")
+  dx_summary <- summarize_category_decisions(filtered_combined, dx_config)
+  kable(dx_summary$all, caption = "CDX decision summary") %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+    print()
+
+  cat(sprintf("\n*Samples retained: %d of %d*\n\n",
+              dx_summary$total_after, dx_summary$total_before))
+
+  cat("### Ancestry (Group × Race × Ethnicity → Ancestry)\n\n")
+  anc_summary <- summarize_grouping_decisions(filtered_combined, ancestry_config)
+  kable(anc_summary$group_summary, caption = "Ancestry group summary") %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+    print()
+
+  if (nrow(anc_summary$unmatched) > 0) {
+    cat("\n::: {.callout-warning}\n")
+    cat("#### Unmatched rows — will be excluded\n\n")
+    kable(anc_summary$unmatched) %>%
+      kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+      print()
+    cat(":::\n\n")
+  } else {
+    cat("\n*All rows matched an ancestry rule.* ✓\n\n")
+  }
+}
+```
+
+## Step 6d: Apply, Validate, and Save
+
+```{r}
+#| label: step6d-apply
+#| echo: false
+#| results: asis
+
+if (INCLUDE_DERIVED_COVARS) {
+  n_before <- nrow(filtered_combined)
+
+  # Apply CDX grouping (drops excluded and unaccounted rows internally)
+  filtered_combined <- apply_category_config(filtered_combined, dx_config)
+
+  # Apply ancestry grouping (drops unmatched rows when exclude_other = FILTER_NA_COVARS)
+  filtered_combined <- apply_grouping_config(filtered_combined, ancestry_config)
+
+  # Explicit NA safety-net filter
+  if (FILTER_NA_COVARS) {
+    filtered_combined <- filtered_combined %>%
+      filter(!is.na(CDX_collapsed), !is.na(Ancestry))
+  }
+
+  n_after <- nrow(filtered_combined)
+  cat(sprintf("**Rows before grouping:** %d | **After:** %d | **Removed:** %d\n\n",
+              n_before, n_after, n_before - n_after))
+
+  # APOE4 carrier variables (simple computation — not config-based)
   filtered_combined <- filtered_combined %>%
     mutate(
-      APOE4_minus_APOE = APOE4 - APOE,
-      ABeta42_minus_ABeta40 = A_42 - A_40
+      APOE4_carrier = grepl("4", APOE.geno),
+      APOE4_count   = case_when(
+        grepl("4.*4", APOE.geno) ~ 2L,
+        grepl("4",    APOE.geno) ~ 1L,
+        !is.na(APOE.geno)        ~ 0L,
+        TRUE                     ~ NA_integer_
+      )
     )
 
+  cat("### Final Group Sizes (CDX_collapsed × Ancestry)\n\n")
+  validate_groups(filtered_combined, c("CDX_collapsed", "Ancestry"), min_n = 5)
 
-  cat("Added two derived biomarker columns:\n\n")
-  cat("| Derived Biomarker | Formula |\n")
-  cat("|-------------------|--------|\n")
-  cat("| `APOE4_minus_APOE` | APOE4 - APOE |\n")
-  cat("| `ABeta42_minus_ABeta40` | A_42 - A_40 |\n\n")
-
-  # Overwrite filtered files with new columns
   write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
+  cat("\n`filtered_combined_post_QC.csv` updated with CDX_collapsed, Ancestry, APOE4_carrier, APOE4_count.\n\n")
 
-  cat("Filtered files updated with derived biomarkers.\n\n")
-
-  # Summary statistics for derived biomarkers
-  cat("### Summary Statistics\n\n")
-
-  apoe_stats <- filtered_combined %>%
-    summarise(
-      N = sum(!is.na(APOE4_minus_APOE)),
-      Mean = round(mean(APOE4_minus_APOE, na.rm = TRUE), 3),
-      SD = round(sd(APOE4_minus_APOE, na.rm = TRUE), 3),
-      Min = round(min(APOE4_minus_APOE, na.rm = TRUE), 3),
-      Median = round(median(APOE4_minus_APOE, na.rm = TRUE), 3),
-      Max = round(max(APOE4_minus_APOE, na.rm = TRUE), 3)
-    ) %>%
-    mutate(Biomarker = "APOE4_minus_APOE", .before = 1)
-
-  abeta_stats <- filtered_combined %>%
-    summarise(
-      N = sum(!is.na(ABeta42_minus_ABeta40)),
-      Mean = round(mean(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
-      SD = round(sd(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
-      Min = round(min(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
-      Median = round(median(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
-      Max = round(max(ABeta42_minus_ABeta40, na.rm = TRUE), 3)
-    ) %>%
-    mutate(Biomarker = "ABeta42_minus_ABeta40", .before = 1)
-
-  derived_stats <- bind_rows(apoe_stats, abeta_stats)
-
-  kable(derived_stats, caption = "Derived Biomarker Summary Statistics") %>%
-    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
-    print()
+} else {
+  cat("*Skipped (include_derived_covariates = FALSE)*\n\n")
 }
+```
+
+# Step 7: Add Derived Biomarkers {#step7}
+
+```{r}
+#| label: step7-derived-biomarkers
+#| echo: false
+#| results: asis
+
+if (INCLUDE_DERIVED_BIOMARKS) {
+  cat("## Creating Derived Biomarker Columns\n\n")
+
+  # Check that required columns exist
+  required_cols <- c("APOE", "APOE4", "A_40", "A_42")
+  missing_combined <- required_cols[!required_cols %in% names(filtered_combined)]
+
+  if (length(missing_combined) > 0) {
+    cat("::: {.callout-warning}\n")
+    cat("### Missing Source Columns\n\n")
+    cat("Missing in filtered_combined: ", paste(missing_combined, collapse = ", "), "\n")
+    cat(":::\n\n")
+  } else {
+    # Add derived columns to filtered_combined
+    filtered_combined <- filtered_combined %>%
+      mutate(
+        APOE4_minus_APOE = APOE4 - APOE,
+        ABeta42_minus_ABeta40 = A_42 - A_40
+      )
+
+    cat("Added two derived biomarker columns:\n\n")
+    cat("| Derived Biomarker | Formula |\n")
+    cat("|-------------------|--------|\n")
+    cat("| `APOE4_minus_APOE` | APOE4 - APOE |\n")
+    cat("| `ABeta42_minus_ABeta40` | A_42 - A_40 |\n\n")
+
+    # Overwrite filtered files with new columns
+    write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
+
+    cat("Filtered files updated with derived biomarkers.\n\n")
+
+    # Summary statistics for derived biomarkers
+    cat("### Summary Statistics\n\n")
+
+    apoe_stats <- filtered_combined %>%
+      summarise(
+        N = sum(!is.na(APOE4_minus_APOE)),
+        Mean = round(mean(APOE4_minus_APOE, na.rm = TRUE), 3),
+        SD = round(sd(APOE4_minus_APOE, na.rm = TRUE), 3),
+        Min = round(min(APOE4_minus_APOE, na.rm = TRUE), 3),
+        Median = round(median(APOE4_minus_APOE, na.rm = TRUE), 3),
+        Max = round(max(APOE4_minus_APOE, na.rm = TRUE), 3)
+      ) %>%
+      mutate(Biomarker = "APOE4_minus_APOE", .before = 1)
+
+    abeta_stats <- filtered_combined %>%
+      summarise(
+        N = sum(!is.na(ABeta42_minus_ABeta40)),
+        Mean = round(mean(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+        SD = round(sd(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+        Min = round(min(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+        Median = round(median(ABeta42_minus_ABeta40, na.rm = TRUE), 3),
+        Max = round(max(ABeta42_minus_ABeta40, na.rm = TRUE), 3)
+      ) %>%
+      mutate(Biomarker = "ABeta42_minus_ABeta40", .before = 1)
+
+    derived_stats <- bind_rows(apoe_stats, abeta_stats)
+
+    kable(derived_stats, caption = "Derived Biomarker Summary Statistics") %>%
+      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+      print()
+  }
+} else {
+  cat("*Skipped (include_derived_biomarkers = FALSE)*\n\n")
+}
+```
+
+# Save preprocessed_data.rds {#save-rds}
+
+```{r}
+#| label: save-rds
+#| include: false
+
+# Biomarker cols = everything from NPQ files (not in original metadata, not pipeline-derived)
+pipeline_derived_cols <- c("CDX_collapsed", "Ancestry",
+                           "APOE4_carrier", "APOE4_count",
+                           "APOE4_minus_APOE", "ABeta42_minus_ABeta40")
+biomarker_cols <- setdiff(
+  names(filtered_combined),
+  c(metadata_cols_captured, pipeline_derived_cols)
+)
+
+saveRDS(
+  list(
+    data           = filtered_combined,
+    biomarker_cols = biomarker_cols
+  ),
+  file.path(OUTPUT_DIR, "preprocessed_data.rds")
+)
+
+message(sprintf("Saved preprocessed_data.rds: %d samples, %d biomarker cols",
+                nrow(filtered_combined), length(biomarker_cols)))
 ```
 
 # Output Files {#output}
