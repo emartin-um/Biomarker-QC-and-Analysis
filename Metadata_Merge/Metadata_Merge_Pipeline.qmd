@@ -855,13 +855,15 @@ if (INCLUDE_DERIVED_BIOMARKS) {
 #| label: save-rds
 #| include: false
 
-# Biomarker cols = everything from NPQ files (not in original metadata, not pipeline-derived)
+# Biomarker cols = everything from NPQ files (not in original metadata, not pipeline-derived,
+#   and not NPQ run-level tracking columns)
 pipeline_derived_cols <- c("CDX_collapsed", "Ancestry",
                            "APOE4_carrier", "APOE4_count",
                            "APOE4_minus_APOE", "ABeta42_minus_ABeta40")
+npq_run_cols <- c("___1", "Run", "Bay")   # NPQ instrument metadata, not protein measurements
 biomarker_cols <- setdiff(
   names(filtered_combined),
-  c(metadata_cols_captured, pipeline_derived_cols)
+  c(metadata_cols_captured, pipeline_derived_cols, npq_run_cols)
 )
 
 saveRDS(
