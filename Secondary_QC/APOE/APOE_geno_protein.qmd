@@ -1,0 +1,540 @@
+---
+title: "APOE"
+format: html
+editor: visual
+---
+
+```{r}
+#| echo: false
+
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(writexl)
+
+# ---- Read data ----
+filtered_combined_post_QC <- read.csv(
+  "../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
+)
+
+# ---- Load WGS APOE lookup and join (if not already present from Metadata_Merge) ----
+if (!"APOE_WGS" %in% names(filtered_combined_post_QC)) {
+  wgs_lookup <- read.csv("U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv") %>%
+    select(SAMPLE_ALIQUOT, APOE_WGS) %>%
+    distinct()
+  filtered_combined_post_QC <- filtered_combined_post_QC %>%
+    left_join(wgs_lookup, by = "SAMPLE_ALIQUOT")
+}
+
+# ---- Clean APOE genotype ----
+apoe_clean <- filtered_combined_post_QC$APOE.geno |>
+  trimws() |>
+  gsub("/", "", x = _) |>     # remove slash
+  gsub("\\s+", "", x = _)     # remove spaces
+
+apoe_clean[apoe_clean == ""] <- NA
+
+# biologically meaningful genotype order
+apoe_levels <- c("22","23","33","24","34","44")
+
+filtered_combined_post_QC$APOEgeno <- factor(
+  apoe_clean,
+  levels = apoe_levels
+)
+
+# QC check
+str(filtered_combined_post_QC$APOEgeno)
+table(filtered_combined_post_QC$APOEgeno, useNA = "ifany")
+
+
+# ---- Create APOE4 minus APOE variable ----
+filtered_combined_post_QC <- filtered_combined_post_QC %>%
+  mutate(APOE4_minus_APOE = APOE4 - APOE)
+
+# ---- Pretty ggplot: APOE4_minus_APOE by genotype ----
+p <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE)) %>%
+  ggplot(aes(x = APOEgeno, y = APOE4_minus_APOE, fill = APOEgeno)) +
+  geom_boxplot(
+    outlier.shape = NA,
+    alpha = 0.6,
+    width = 0.65
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 1.5,
+    alpha = 0.5
+  ) +
+  labs(
+    x = "APOE Genotype",
+    y = "APOE4 − APOE",
+    title = "APOE4 − APOE by APOE Genotype"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+p
+
+
+
+# ---- 1. Compute genotype-specific bounds ----
+apoe_bounds <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE)) %>%
+  group_by(APOEgeno) %>%
+  summarise(
+    Q1 = quantile(APOE4_minus_APOE, 0.25, na.rm = TRUE),
+    Q3 = quantile(APOE4_minus_APOE, 0.75, na.rm = TRUE),
+    IQR = Q3 - Q1,
+    lower = Q1 - 3 * IQR,
+    upper = Q3 + 3 * IQR,
+    .groups = "drop"
+  )
+
+# ---- 2. Identify extreme outliers ----
+apoe_outliers <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE)) %>%
+  left_join(apoe_bounds, by = "APOEgeno") %>%
+  filter(APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
+
+# ---- 3. QC summary ----
+cat("\nExtreme outliers by APOE genotype:\n")
+print(table(apoe_outliers$APOEgeno))
+
+cat("\nTotal extreme outliers:\n")
+print(nrow(apoe_outliers))
+
+# ---- Compute genotype medians ----
+apoe_medians <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE)) %>%
+  group_by(APOEgeno) %>%
+  summarise(
+    genotype_median = median(APOE4_minus_APOE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ---- Create ranked QC table ----
+apoe_qc_ranked <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE)) %>%
+  left_join(apoe_medians, by = "APOEgeno") %>%
+  mutate(
+    deviation = APOE4_minus_APOE - genotype_median,
+    abs_deviation = abs(deviation)
+  ) %>%
+  arrange(desc(abs_deviation))
+
+# ---- 4. Write outliers to file ----
+write_xlsx(
+  apoe_outliers,
+  "APOE4_minus_APOE_extreme_outliers_by_genotype.xlsx"
+)
+write_xlsx(
+  apoe_qc_ranked,
+  "Outliers_Ranked.xlsx"
+)
+
+# ---- 5. Add outliers to plot ----
+p_outliers <- p +
+  geom_point(
+    data = apoe_outliers,
+    aes(x = APOEgeno, y = APOE4_minus_APOE),
+    color = "red",
+    size = 2,
+    inherit.aes = FALSE
+  ) +
+  geom_text_repel(
+    data = apoe_outliers,
+    aes(
+      x = APOEgeno,
+      y = APOE4_minus_APOE,
+      label = SAMPLE_ALIQUOT   # <-- replace with your ID column
+    ),
+    size = 3,
+    color = "red",
+    max.overlaps = 20,
+    inherit.aes = FALSE
+  )
+
+p_outliers
+```
+
+# WGS APOE Comparison
+
+```{r}
+#| echo: false
+#| label: wgs-concordance
+#| results: asis
+
+# ---- Build WGS genotype factor (same levels as original) ----
+filtered_combined_post_QC <- filtered_combined_post_QC %>%
+  mutate(APOEgeno_WGS = factor(trimws(APOE_WGS), levels = apoe_levels))
+
+# ---- Concordance summary ----
+concordance_df <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno), !is.na(APOEgeno_WGS)) %>%
+  mutate(
+    orig_digits = gsub("/", "", as.character(APOEgeno)),
+    concordant  = orig_digits == trimws(APOE_WGS)
+  )
+
+n_total   <- nrow(filtered_combined_post_QC)
+n_wgs     <- sum(!is.na(filtered_combined_post_QC$APOEgeno_WGS))
+n_gained  <- sum(is.na(filtered_combined_post_QC$APOEgeno) &
+                   !is.na(filtered_combined_post_QC$APOEgeno_WGS))
+conc_rate <- mean(concordance_df$concordant, na.rm = TRUE)
+n_discord <- sum(!concordance_df$concordant, na.rm = TRUE)
+
+cat(sprintf("- Samples with WGS genotype: **%d** / %d (%.1f%%)\n",
+            n_wgs, n_total, 100 * n_wgs / n_total))
+cat(sprintf("- Samples gaining genotype from WGS (were NA in original): **%d**\n", n_gained))
+cat(sprintf("- Concordance rate (where both available): **%.1f%%** (%d/%d)\n",
+            100 * conc_rate, sum(concordance_df$concordant), nrow(concordance_df)))
+cat(sprintf("- Discordant samples: **%d**\n\n", n_discord))
+
+cat("### Genotype Cross-Tabulation (Original vs WGS)\n\n")
+ct <- table(Original = concordance_df$orig_digits, WGS = concordance_df$APOE_WGS)
+print(ct)
+```
+
+```{r}
+#| echo: false
+#| label: wgs-discordant-table
+#| results: asis
+
+discordant_df <- concordance_df %>%
+  filter(!concordant) %>%
+  select(SAMPLE_ALIQUOT, CDX, APOE.geno, APOE_WGS, APOE4_minus_APOE) %>%
+  arrange(APOE.geno, APOE_WGS)
+
+cat("### Discordant Samples\n\n")
+print(knitr::kable(
+  discordant_df,
+  col.names = c("Sample Aliquot", "Diagnosis", "Original", "WGS", "APOE4 \u2212 APOE"),
+  digits = 3,
+  caption = "Samples where original and WGS APOE genotypes differ"
+))
+```
+
+```{r}
+#| echo: false
+#| label: wgs-boxplot
+
+# ---- APOE4_minus_APOE by WGS genotype ----
+p_wgs <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_WGS), !is.na(APOE4_minus_APOE)) %>%
+  ggplot(aes(x = APOEgeno_WGS, y = APOE4_minus_APOE, fill = APOEgeno_WGS)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.65) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  labs(
+    x     = "APOE Genotype (WGS)",
+    y     = "APOE4 \u2212 APOE",
+    title = "APOE4 \u2212 APOE by WGS Genotype"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold", hjust = 0.5))
+
+p_wgs
+```
+
+```{r}
+#| echo: false
+#| label: wgs-discordant-plots
+
+# ---- Highlight discordant samples on both plots ----
+discordant_pts <- concordance_df %>% filter(!concordant)
+
+p_orig_discord <- p +
+  geom_point(
+    data        = discordant_pts,
+    aes(x = APOEgeno, y = APOE4_minus_APOE),
+    color       = "purple", size = 2.5, inherit.aes = FALSE
+  ) +
+  geom_text_repel(
+    data        = discordant_pts,
+    aes(x = APOEgeno, y = APOE4_minus_APOE,
+        label = paste0(SAMPLE_ALIQUOT, "\n(WGS:", APOE_WGS, ")")),
+    size        = 2.5, color = "purple", max.overlaps = 20, inherit.aes = FALSE
+  ) +
+  labs(title = "Original Genotype \u2014 Discordant Samples in Purple")
+
+p_wgs_discord <- p_wgs +
+  geom_point(
+    data        = discordant_pts,
+    aes(x = APOEgeno_WGS, y = APOE4_minus_APOE),
+    color       = "purple", size = 2.5, inherit.aes = FALSE
+  ) +
+  geom_text_repel(
+    data        = discordant_pts,
+    aes(x = APOEgeno_WGS, y = APOE4_minus_APOE,
+        label = paste0(SAMPLE_ALIQUOT, "\n(orig:", orig_digits, ")")),
+    size        = 2.5, color = "purple", max.overlaps = 20, inherit.aes = FALSE
+  ) +
+  labs(title = "WGS Genotype \u2014 Discordant Samples in Purple")
+
+p_orig_discord
+p_wgs_discord
+```
+
+```{r}
+#| echo: false
+#| label: wgs-outliers
+#| results: asis
+
+# ---- Re-run outlier detection using WGS genotype ----
+wgs_bounds <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_WGS), !is.na(APOE4_minus_APOE)) %>%
+  group_by(APOEgeno_WGS) %>%
+  summarise(
+    Q1    = quantile(APOE4_minus_APOE, 0.25, na.rm = TRUE),
+    Q3    = quantile(APOE4_minus_APOE, 0.75, na.rm = TRUE),
+    IQR   = Q3 - Q1,
+    lower = Q1 - 3 * IQR,
+    upper = Q3 + 3 * IQR,
+    .groups = "drop"
+  )
+
+apoe_wgs_outliers <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_WGS), !is.na(APOE4_minus_APOE)) %>%
+  left_join(wgs_bounds, by = "APOEgeno_WGS") %>%
+  filter(APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
+
+orig_ids     <- apoe_outliers$SAMPLE_ALIQUOT
+wgs_ids      <- apoe_wgs_outliers$SAMPLE_ALIQUOT
+resolved     <- setdiff(orig_ids, wgs_ids)
+new_outliers <- setdiff(wgs_ids, orig_ids)
+persisted    <- intersect(orig_ids, wgs_ids)
+
+cat("### WGS Outlier Comparison (3\u00d7IQR)\n\n")
+cat("| | Count |\n|---|---|\n")
+cat(sprintf("| Original genotype outliers | %d |\n", length(orig_ids)))
+cat(sprintf("| WGS genotype outliers | %d |\n", length(wgs_ids)))
+cat(sprintf("| **Resolved by WGS re-assignment** | **%d** |\n", length(resolved)))
+cat(sprintf("| New outliers introduced | %d |\n", length(new_outliers)))
+cat(sprintf("| Persistent (both methods) | %d |\n\n", length(persisted)))
+
+if (length(resolved) > 0) {
+  cat("**Resolved outliers (no longer extreme under WGS genotype):**\n")
+  cat(paste("-", resolved, collapse = "\n"), "\n\n")
+}
+if (length(new_outliers) > 0) {
+  cat("**New outliers introduced under WGS genotype:**\n")
+  cat(paste("-", new_outliers, collapse = "\n"), "\n\n")
+}
+if (length(persisted) > 0) {
+  cat("**Persistent outliers (flagged by both methods \u2014 likely true biology):**\n")
+  cat(paste("-", persisted, collapse = "\n"), "\n\n")
+}
+
+write_xlsx(apoe_wgs_outliers, "APOE4_minus_APOE_WGS_outliers.xlsx")
+cat("*WGS-based outliers written to `APOE4_minus_APOE_WGS_outliers.xlsx`*\n")
+```
+
+# APOE.geno_final — Primary Analysis
+
+```{r}
+#| echo: false
+#| label: final-geno-setup
+#| results: asis
+
+# ---- Build APOEgeno_final factor (same cleaning as APOEgeno) ----
+final_clean <- filtered_combined_post_QC$APOE.geno_final |>
+  trimws() |>
+  gsub("/", "", x = _) |>
+  gsub("\\s+", "", x = _)
+final_clean[final_clean == ""] <- NA
+
+filtered_combined_post_QC$APOEgeno_final <- factor(final_clean, levels = apoe_levels)
+
+n_total         <- nrow(filtered_combined_post_QC)
+n_final         <- sum(!is.na(filtered_combined_post_QC$APOEgeno_final))
+n_wgs_corrected <- sum(filtered_combined_post_QC$APOE_WGS_changed, na.rm = TRUE)
+n_orig_only     <- sum(!is.na(filtered_combined_post_QC$APOEgeno_final) &
+                          is.na(filtered_combined_post_QC$APOEgeno_WGS))
+
+cat(sprintf("- Total samples: **%d**\n", n_total))
+cat(sprintf("- Samples with APOE.geno_final: **%d** (%.1f%%)\n",
+            n_final, 100 * n_final / n_total))
+cat(sprintf("- Genotypes from WGS (corrected or new): **%d**\n",
+            sum(!is.na(filtered_combined_post_QC$APOEgeno_WGS))))
+cat(sprintf("- Genotypes corrected by WGS: **%d**\n", n_wgs_corrected))
+cat(sprintf("- Genotypes from original only (no WGS): **%d**\n\n", n_orig_only))
+
+cat("### Genotype distribution (APOE.geno_final)\n\n")
+print(table(filtered_combined_post_QC$APOEgeno_final, useNA = "ifany"))
+```
+
+```{r}
+#| echo: false
+#| label: final-geno-boxplot
+
+# ---- APOE4_minus_APOE by APOE.geno_final ----
+p_final <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_final), !is.na(APOE4_minus_APOE)) %>%
+  ggplot(aes(x = APOEgeno_final, y = APOE4_minus_APOE, fill = APOEgeno_final)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6, width = 0.65) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  labs(
+    x     = "APOE Genotype (final)",
+    y     = "APOE4 \u2212 APOE",
+    title = "APOE4 \u2212 APOE by APOE.geno_final\n(WGS-corrected where available, original otherwise)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold", hjust = 0.5))
+
+# ---- Highlight WGS-corrected samples in orange ----
+wgs_changed_pts <- filtered_combined_post_QC %>%
+  filter(APOE_WGS_changed == TRUE, !is.na(APOEgeno_final), !is.na(APOE4_minus_APOE)) %>%
+  mutate(orig_digits = gsub("/", "", as.character(APOEgeno)))
+
+p_final_annotated <- p_final +
+  geom_point(
+    data        = wgs_changed_pts,
+    aes(x = APOEgeno_final, y = APOE4_minus_APOE),
+    color       = "darkorange", size = 2.5, inherit.aes = FALSE
+  ) +
+  geom_text_repel(
+    data        = wgs_changed_pts,
+    aes(x = APOEgeno_final, y = APOE4_minus_APOE,
+        label = paste0(SAMPLE_ALIQUOT, "\n(", orig_digits, "\u2192", trimws(APOE_WGS), ")")),
+    size        = 2.5, color = "darkorange", max.overlaps = 20, inherit.aes = FALSE
+  ) +
+  labs(title = "APOE4 \u2212 APOE by APOE.geno_final\nWGS-corrected samples in orange (orig\u2192WGS)")
+
+p_final_annotated
+```
+
+```{r}
+#| echo: false
+#| label: final-geno-outliers
+#| results: asis
+
+# ---- Outlier detection using APOE.geno_final ----
+final_bounds <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_final), !is.na(APOE4_minus_APOE)) %>%
+  group_by(APOEgeno_final) %>%
+  summarise(
+    Q1    = quantile(APOE4_minus_APOE, 0.25, na.rm = TRUE),
+    Q3    = quantile(APOE4_minus_APOE, 0.75, na.rm = TRUE),
+    IQR   = Q3 - Q1,
+    lower = Q1 - 3 * IQR,
+    upper = Q3 + 3 * IQR,
+    .groups = "drop"
+  )
+
+apoe_final_outliers <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_final), !is.na(APOE4_minus_APOE)) %>%
+  left_join(final_bounds, by = "APOEgeno_final") %>%
+  filter(APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
+
+# ---- Compare to original outliers ----
+orig_ids     <- apoe_outliers$SAMPLE_ALIQUOT
+final_ids    <- apoe_final_outliers$SAMPLE_ALIQUOT
+resolved     <- setdiff(orig_ids, final_ids)
+new_outliers <- setdiff(final_ids, orig_ids)
+persisted    <- intersect(orig_ids, final_ids)
+
+# ---- Annotate outlier sets with WGS status ----
+outlier_meta <- filtered_combined_post_QC %>%
+  select(SAMPLE_ALIQUOT, APOEgeno, APOEgeno_WGS, APOEgeno_final, APOE_WGS_changed) %>%
+  mutate(has_wgs = !is.na(APOEgeno_WGS))
+
+# Resolved: split into WGS-corrected vs. shifted IQR boundary (no WGS change)
+resolved_meta    <- outlier_meta %>% filter(SAMPLE_ALIQUOT %in% resolved)
+resolved_by_wgs  <- resolved_meta %>% filter(APOE_WGS_changed == TRUE)  %>% pull(SAMPLE_ALIQUOT)
+resolved_no_wgs  <- resolved_meta %>% filter(APOE_WGS_changed != TRUE | is.na(APOE_WGS_changed)) %>% pull(SAMPLE_ALIQUOT)
+
+# Persistent: three sub-categories
+persisted_meta      <- outlier_meta %>% filter(SAMPLE_ALIQUOT %in% persisted)
+p_wgs_agreed        <- persisted_meta %>% filter(has_wgs, APOE_WGS_changed != TRUE) %>% pull(SAMPLE_ALIQUOT)
+p_wgs_still_outlier <- persisted_meta %>% filter(APOE_WGS_changed == TRUE)           %>% pull(SAMPLE_ALIQUOT)
+p_no_wgs            <- persisted_meta %>% filter(!has_wgs)                            %>% pull(SAMPLE_ALIQUOT)
+
+cat("### APOE.geno_final Outlier Summary (3\u00d7IQR)\n\n")
+cat("| | Count |\n|---|---|\n")
+cat(sprintf("| Original genotype outliers | %d |\n", length(orig_ids)))
+cat(sprintf("| APOE.geno_final outliers | %d |\n", length(final_ids)))
+cat(sprintf("| Resolved total | %d |\n", length(resolved)))
+cat(sprintf("| \u00a0\u00a0 \u2514 resolved by WGS genotype correction | %d |\n", length(resolved_by_wgs)))
+cat(sprintf("| \u00a0\u00a0 \u2514 resolved for other reasons (IQR shift, no WGS change) | %d |\n", length(resolved_no_wgs)))
+cat(sprintf("| New outliers introduced | %d |\n", length(new_outliers)))
+cat(sprintf("| Persistent total | %d |\n", length(persisted)))
+cat(sprintf("| \u00a0\u00a0 \u2514 WGS confirms genotype, still outlier | %d |\n", length(p_wgs_agreed)))
+cat(sprintf("| \u00a0\u00a0 \u2514 WGS corrected genotype but still outlier | %d |\n", length(p_wgs_still_outlier)))
+cat(sprintf("| \u00a0\u00a0 \u2514 no WGS yet (trivially persistent \u2014 genotype unchanged) | %d |\n\n", length(p_no_wgs)))
+
+if (length(resolved) > 0) {
+  cat("**Resolved outliers:**\n\n")
+  if (length(resolved_by_wgs) > 0) {
+    cat(sprintf("  *Resolved by WGS genotype correction (%d) \u2014 WGS moved them to a better-fitting group:*\n",
+                length(resolved_by_wgs)))
+    cat(paste("  -", resolved_by_wgs, collapse = "\n"), "\n\n")
+  }
+  if (length(resolved_no_wgs) > 0) {
+    cat(sprintf("  *Resolved without WGS change (%d) \u2014 IQR boundary shift or no WGS data:*\n",
+                length(resolved_no_wgs)))
+    cat(paste("  -", resolved_no_wgs, collapse = "\n"), "\n\n")
+  }
+}
+
+if (length(new_outliers) > 0) {
+  cat("**New outliers under APOE.geno_final:**\n")
+  cat(paste("-", new_outliers, collapse = "\n"), "\n\n")
+}
+
+if (length(persisted) > 0) {
+  cat("**Persistent outliers \u2014 sub-categories:**\n\n")
+  if (length(p_wgs_agreed) > 0) {
+    cat(sprintf("  *WGS confirms genotype, still extreme (%d) \u2014 strongest signal for true biology or QC concern:*\n",
+                length(p_wgs_agreed)))
+    cat(paste("  -", p_wgs_agreed, collapse = "\n"), "\n\n")
+  }
+  if (length(p_wgs_still_outlier) > 0) {
+    cat(sprintf("  *WGS corrected genotype but still outlier (%d) \u2014 investigate further:*\n",
+                length(p_wgs_still_outlier)))
+    cat(paste("  -", p_wgs_still_outlier, collapse = "\n"), "\n\n")
+  }
+  if (length(p_no_wgs) > 0) {
+    cat(sprintf("  *No WGS data yet (%d) \u2014 trivially persistent (genotype unchanged); flag for future WGS follow-up:*\n",
+                length(p_no_wgs)))
+    cat(paste("  -", p_no_wgs, collapse = "\n"), "\n\n")
+  }
+}
+
+# ---- Ranked table ----
+final_medians <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_final), !is.na(APOE4_minus_APOE)) %>%
+  group_by(APOEgeno_final) %>%
+  summarise(genotype_median = median(APOE4_minus_APOE, na.rm = TRUE), .groups = "drop")
+
+apoe_final_ranked <- filtered_combined_post_QC %>%
+  filter(!is.na(APOEgeno_final), !is.na(APOE4_minus_APOE)) %>%
+  left_join(final_medians, by = "APOEgeno_final") %>%
+  mutate(deviation = APOE4_minus_APOE - genotype_median,
+         abs_deviation = abs(deviation)) %>%
+  arrange(desc(abs_deviation))
+
+# ---- Overlay outliers on p_final ----
+p_final_outliers <- p_final +
+  geom_point(
+    data = apoe_final_outliers,
+    aes(x = APOEgeno_final, y = APOE4_minus_APOE),
+    color = "red", size = 2, inherit.aes = FALSE
+  ) +
+  geom_text_repel(
+    data = apoe_final_outliers,
+    aes(x = APOEgeno_final, y = APOE4_minus_APOE, label = SAMPLE_ALIQUOT),
+    size = 3, color = "red", max.overlaps = 20, inherit.aes = FALSE
+  ) +
+  labs(title = "APOE4 \u2212 APOE by APOE.geno_final \u2014 Extreme Outliers in Red")
+
+p_final_outliers
+
+# ---- Write Excel ----
+write_xlsx(apoe_final_outliers, "APOE4_minus_APOE_final_outliers.xlsx")
+write_xlsx(apoe_final_ranked,   "Outliers_Ranked_Final.xlsx")
+cat("*APOE.geno_final outliers written to `APOE4_minus_APOE_final_outliers.xlsx` and `Outliers_Ranked_Final.xlsx`*\n")
+```

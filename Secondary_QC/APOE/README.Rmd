@@ -1,0 +1,64 @@
+---
+title: "README: APOE Genotype–Protein QC"
+author: "ERM"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+Secondary QC examining the relationship between APOE genotype and APOE/APOE4 protein levels. Flags samples whose protein signal is inconsistent with their genotype (extreme outliers by genotype group), and compares WGS-derived genotypes against the original array/clinical genotypes.
+
+## Script
+
+**`APOE_geno_protein.qmd`** — single self-contained Quarto document. Reads from the Metadata_Merge filtered output and the WGS metadata file in this folder.
+
+### Inputs
+
+| File | Description |
+|---|---|
+| `../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv` | Post-QC merged data with `APOE.geno`, `APOE`, `APOE4` columns |
+| `U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv` | Metadata file with `APOE_WGS` column (WGS-derived genotypes for ~502 samples) |
+
+### Analysis
+
+1. **Original genotype QC** — cleans `APOE.geno` to a factor (`22/23/33/24/34/44`), computes `APOE4 − APOE`, flags 3×IQR extreme outliers per genotype group.
+
+2. **WGS comparison** — joins `APOE_WGS` by `SAMPLE_ALIQUOT` and reports:
+   - How many samples have WGS data and how many gain a genotype (were previously NA)
+   - Concordance rate and cross-tabulation of original vs. WGS calls
+   - Table of discordant samples (~30 samples where calls differ)
+   - Side-by-side boxplots (original vs. WGS genotype) with discordant samples highlighted in purple
+   - Re-run of 3×IQR outlier detection using WGS genotype — reports resolved, new, and persistent outliers
+
+3. **APOE.geno_final — primary analysis** — uses all ~2100 samples (WGS where available, original as fallback):
+   - Boxplot with WGS-corrected samples highlighted in orange showing original→WGS correction
+   - 3×IQR outlier detection; persistent outliers sub-categorized by WGS status:
+     - *WGS confirms genotype, still outlier* — strongest signal for true biology or QC concern
+     - *WGS corrected but still outlier* — investigate further
+     - *No WGS yet* — trivially persistent (genotype unchanged); flag for future follow-up
+   - Resolved outliers split into: corrected by WGS vs. IQR boundary shift
+
+### Outputs
+
+| File | Description |
+|---|---|
+| `APOE4_minus_APOE_extreme_outliers_by_genotype.xlsx` | Extreme outliers flagged using **original** genotype |
+| `Outliers_Ranked.xlsx` | All samples ranked by deviation from genotype median (original genotype) |
+| `APOE4_minus_APOE_WGS_outliers.xlsx` | Extreme outliers flagged using **WGS** genotype (~502 samples with WGS only) |
+| `APOE4_minus_APOE_final_outliers.xlsx` | Extreme outliers flagged using **APOE.geno_final** (all samples — primary output) |
+| `Outliers_Ranked_Final.xlsx` | All samples ranked by deviation from genotype median using **APOE.geno_final** |
+
+## WGS Genotype Integration (Downstream)
+
+The Metadata_Merge pipeline (Step 6d) now joins `APOE_WGS` and produces:
+
+- `APOE.geno_final` — best available genotype (WGS preferred, original as fallback)
+- `APOE_WGS_changed` — logical flag for samples whose genotype was corrected by WGS
+- `APOE4_carrier` / `APOE4_count` — now derived from `APOE.geno_final`
+
+**Downstream analyses should use `APOE.geno_final` instead of `APOE.geno`** when genotype accuracy matters. `APOE.geno` (original) is retained for comparison with prior results.

@@ -1,6 +1,6 @@
 # Metadata Merge
 
-Merges post-QC biomarker data with sample metadata, applies exclusion filters, derives covariate groupings (diagnosis, ancestry, APOE status), and produces analysis-ready datasets including a `preprocessed_data.rds` for downstream pipelines.
+Merges post-QC biomarker data with sample metadata, applies exclusion filters, derives covariate groupings (diagnosis, ancestry, APOE status with WGS correction), and produces analysis-ready datasets including a `preprocessed_data.rds` for downstream pipelines.
 
 ## Usage
 
@@ -86,7 +86,7 @@ Config-driven, designed to be re-configured for each new dataset. Four sub-steps
 - **6a Explore**: Prints CDX distribution and Group × Race × Ethnicity combinations to inform grouping decisions.
 - **6b Config**: User-editable block defining `dx_config` (diagnosis grouping) and `ancestry_config` (ancestry grouping) using `make_category_config()` / `make_grouping_config()`. **Edit this block when processing a new dataset.**
 - **6c Preview**: Shows decision tables and any unmatched rows *before* applying anything — no data is modified.
-- **6d Apply**: Applies configs, computes APOE4 carrier variables, validates group sizes, saves updated CSV.
+- **6d Apply**: Applies configs, joins WGS APOE genotypes, computes APOE4 carrier variables, validates group sizes, saves updated CSV.
 
 Derived columns produced:
 
@@ -94,8 +94,14 @@ Derived columns produced:
 |---|---|---|
 | `CDX_collapsed` | character | Collapsed diagnosis: NCI / MCI / AD / Dementia_Other |
 | `Ancestry` | character | Grouped ancestry: AA / AFDC / HI_WH / HI_MU / HI_BL |
-| `APOE4_carrier` | logical | TRUE if any E4 allele present |
-| `APOE4_count` | integer | Number of E4 alleles (0 / 1 / 2) |
+| `APOE_WGS` | character | Raw WGS genotype (e.g., `"34"`); NA if not genotyped |
+| `APOE_WGS_norm` | character | WGS genotype normalized to `"a/b"` format (e.g., `"3/4"`) |
+| `APOE_WGS_changed` | logical | TRUE if WGS genotype differs from original `APOE.geno` |
+| `APOE.geno_final` | character | Best available genotype: WGS where available, otherwise original |
+| `APOE4_carrier` | logical | TRUE if any E4 allele in `APOE.geno_final` |
+| `APOE4_count` | integer | Number of E4 alleles in `APOE.geno_final` (0 / 1 / 2) |
+
+> **Downstream analyses should use `APOE.geno_final`** rather than `APOE.geno` when genotype accuracy matters. The original `APOE.geno` is retained for comparison with prior results.
 
 When `filter_na_covars = true` (default), rows where CDX_collapsed or Ancestry is NA are excluded.
 
@@ -169,7 +175,7 @@ Metadata_Merge/output_files/
             ▼ Step 6 (covariate groupings) + Step 7 (derived biomarkers)
 
 Metadata_Merge/output_files/filtered/
-    └── filtered_combined_post_QC.csv  ← with CDX_collapsed, Ancestry, APOE4_carrier, APOE4_count
+    └── filtered_combined_post_QC.csv  ← with CDX_collapsed, Ancestry, APOE.geno_final, APOE_WGS_changed, APOE4_carrier, APOE4_count
             │
             ▼ Step 8
 

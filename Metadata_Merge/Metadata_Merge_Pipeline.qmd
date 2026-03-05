@@ -61,7 +61,7 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 3.  **Quality Control** - Identify duplicates, implausible values, and issues
 4.  **Apply Filters** - Create final analysis-ready datasets
 5.  **Exclusion Summary** - Review filtered sample counts
-6.  **Covariate Groupings** *(optional: `include_derived_covariates`, default TRUE)* — explore distributions (6a), define configs (6b), preview decisions (6c), apply + validate + filter (6d); produces CDX_collapsed, Ancestry, APOE4_carrier, APOE4_count; rows excluded by default when either covariate is NA (`filter_na_covars`)
+6.  **Covariate Groupings** *(optional: `include_derived_covariates`, default TRUE)* — explore distributions (6a), define configs (6b), preview decisions (6c), apply + validate + filter (6d); joins WGS APOE genotypes, produces CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final (WGS preferred), APOE4_carrier, APOE4_count; rows excluded by default when either covariate is NA (`filter_na_covars`)
 7.  **Derived Biomarkers** *(optional: `include_derived_biomarkers`, default FALSE)* - APOE4_minus_APOE, ABeta42_minus_ABeta40
 8.  **Save RDS** - Write `preprocessed_data.rds` with data + biomarker_cols
 
@@ -752,23 +752,53 @@ if (INCLUDE_DERIVED_COVARS) {
   cat(sprintf("**Rows before grouping:** %d | **After:** %d | **Removed:** %d\n\n",
               n_before, n_after, n_before - n_after))
 
-  # APOE4 carrier variables (simple computation — not config-based)
-  filtered_combined <- filtered_combined %>%
+  # ---- Join WGS APOE genotypes ----
+  # WGS is the gold standard; used where available, original APOE.geno as fallback.
+  wgs_path <- file.path("..", "Secondary_QC", "APOE",
+                        "U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv")
+  wgs_lookup <- read_csv(wgs_path, show_col_types = FALSE) %>%
+    select(SAMPLE_ALIQUOT, APOE_WGS) %>%
+    distinct() %>%
     mutate(
-      APOE4_carrier = grepl("4", APOE.geno),
-      APOE4_count   = case_when(
-        grepl("4.*4", APOE.geno) ~ 2L,
-        grepl("4",    APOE.geno) ~ 1L,
-        !is.na(APOE.geno)        ~ 0L,
-        TRUE                     ~ NA_integer_
+      APOE_WGS_norm = if_else(
+        !is.na(APOE_WGS) & nchar(trimws(APOE_WGS)) == 2,
+        paste0(substr(trimws(APOE_WGS), 1, 1), "/", substr(trimws(APOE_WGS), 2, 2)),
+        NA_character_
       )
     )
+
+  filtered_combined <- filtered_combined %>%
+    left_join(wgs_lookup, by = "SAMPLE_ALIQUOT")
+
+  # APOE4 carrier variables — derived from WGS-corrected genotype where available
+  filtered_combined <- filtered_combined %>%
+    mutate(
+      # Flag samples where WGS genotype differs from original (both non-NA)
+      APOE_WGS_changed = !is.na(APOE.geno) & !is.na(APOE_WGS_norm) &
+                         (APOE.geno != APOE_WGS_norm),
+      # Best available genotype: WGS takes priority, fall back to original
+      APOE.geno_final  = coalesce(APOE_WGS_norm, APOE.geno),
+      APOE4_carrier    = grepl("4", APOE.geno_final),
+      APOE4_count      = case_when(
+        grepl("4.*4", APOE.geno_final) ~ 2L,
+        grepl("4",    APOE.geno_final) ~ 1L,
+        !is.na(APOE.geno_final)        ~ 0L,
+        TRUE                           ~ NA_integer_
+      )
+    )
+
+  cat(sprintf(
+    "**WGS genotypes joined:** %d samples have WGS data | %d genotypes changed by WGS | %d samples gained a genotype via WGS\n\n",
+    sum(!is.na(filtered_combined$APOE_WGS_norm)),
+    sum(filtered_combined$APOE_WGS_changed, na.rm = TRUE),
+    sum(is.na(filtered_combined$APOE.geno) & !is.na(filtered_combined$APOE_WGS_norm))
+  ))
 
   cat("### Final Group Sizes (CDX_collapsed × Ancestry)\n\n")
   validate_groups(filtered_combined, c("CDX_collapsed", "Ancestry"), min_n = 5)
 
   write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
-  cat("\n`filtered_combined_post_QC.csv` updated with CDX_collapsed, Ancestry, APOE4_carrier, APOE4_count.\n\n")
+  cat("\n`filtered_combined_post_QC.csv` updated with CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final, APOE4_carrier, APOE4_count.\n\n")
 
 } else {
   cat("*Skipped (include_derived_covariates = FALSE)*\n\n")
