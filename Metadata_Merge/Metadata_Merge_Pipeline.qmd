@@ -12,11 +12,11 @@ format:
     embed-resources: true
 params:
   filter_only: false
-  no_copy: false
+  no_copy: true
   include_derived_covariates: true
   include_derived_biomarkers: false
   filter_na_covars: true
-  output_dir: "output_files"
+  output_dir: "output_files_n2850_2026Mar"
 editor: visual
 ---
 
@@ -624,6 +624,25 @@ cat("| Combined | ", nrow(merged_combined), " | ", nrow(filtered_combined), " | 
 
 # Step 6: Covariate Groupings {#step6}
 
+```{r}
+#| label: step6-normalize
+#| include: false
+
+if (INCLUDE_DERIVED_COVARS) {
+  # Normalize ancestry columns before rule matching:
+  # 1. Trim whitespace — Excel/CSV round-trips can leave trailing spaces on
+  #    multi-word values like "BL WH" or "WH MU", causing silent rule mismatches.
+  # 2. Group NA → "NA" string — datasets without a Group assignment (e.g.
+  #    OtherProjects) store actual NA here; the rules match on the string "NA"
+  #    to classify those samples by Race + Ethnicity alone.
+  filtered_combined <- filtered_combined %>%
+    mutate(
+      across(c(Group, Race, Ethnicity), ~str_trim(as.character(.))),
+      Group = replace_na(Group, "NA")
+    )
+}
+```
+
 ## Step 6a: Explore Distributions
 
 ```{r}
@@ -662,11 +681,13 @@ if (INCLUDE_DERIVED_COVARS) {
   dx_config <- make_category_config(
     source_col = "CDX",
     target_col = "CDX_collapsed",
-    keep     = c("NCI", "MCI", "AD"),
+    keep     = c("MCI"),
     collapse = list(
-      "Dementia_Other" = c("Dementia Undetermined", "Dementia Vascular", "Dementia Other")
+      "AD" = c("AD", "Alzheimers Disease"),
+      "NCI" = c("NCI", "Non - Cognitively Impaired"),
+      "Dementia_Other" = c("Dementia Undetermined", "Dementia Vascular", "Dementia Other", "Dementia", "Cognitively Impaired")
     ),
-    exclude  = c("0", "Other", "Insufficient Data")
+    exclude  = c("0", "Other", "Insufficient Data", "NA")
   )
 
   ancestry_config <- make_grouping_config(
@@ -674,12 +695,20 @@ if (INCLUDE_DERIVED_COVARS) {
     other_label   = "Other",
     exclude_other = FILTER_NA_COVARS,
     rules = list(
+      "NH_WH" = list(Group = "NA", Race = "WH", Ethnicity= "NH"),
       "HI_WH" = list(Group = "HI", Race = "WH"),
+      "HI_WH" = list(Group = "NA", Race = "WH", Ethnicity= "HI"),
       "HI_MU" = list(Group = "HI", Race = "MU"),
-      "HI_MU" = list(Group = "HI", Race = "BL WH"),
+      "HI_MU" = list(Race = "BL WH", Ethnicity= "HI"),
+      "HI_MU" = list(Race = "BL  WH", Ethnicity= "HI"),
+      "HI_MU" = list(Race = "WH MU", Ethnicity= "HI"),
+      "HI_MU" = list(Group = "NA", Race = "MU", Ethnicity= "HI"),
+      "HI_MU" = list(Group = "NA", Race = "WH  MU", Ethnicity= "HI"),
       "HI_BL" = list(Group = "HI", Race = "BL"),
       "HI_BL" = list(Group = "AA", Ethnicity = "HI"),
+      "HI_BL" = list(Group = "NA", Race = "BL", Ethnicity= "HI"),
       "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "BL"),
+      "AA" = list(Group = "NA", Race = "BL", Ethnicity= "NH"),
       "AFDC"  = list(Group = "AFDC")
     )
   )
@@ -800,6 +829,21 @@ if (INCLUDE_DERIVED_COVARS) {
 
   write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
   cat("\n`filtered_combined_post_QC.csv` updated with CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final, APOE4_carrier, APOE4_count.\n\n")
+
+  # Sync standard and low CSVs to the final Step-6d sample set.
+  # filtered_combined has been further filtered by ancestry/CDX grouping
+  # (apply_grouping_config + FILTER_NA_COVARS). Standard and low were written
+  # at Step 5 before this filtering; re-filter them now so all three files
+  # share the same sample universe.
+  passing_ids       <- filtered_combined$SAMPLE_ALIQUOT
+  filtered_standard <- filtered_standard %>% filter(SAMPLE_ALIQUOT %in% passing_ids)
+  filtered_low      <- filtered_low      %>% filter(SAMPLE_ALIQUOT %in% passing_ids)
+  write_csv(filtered_standard, file.path(OUTPUT_DIR, "filtered", "filtered_standard_post_QC.csv"))
+  write_csv(filtered_low,      file.path(OUTPUT_DIR, "filtered", "filtered_low_post_QC.csv"))
+  cat(sprintf(
+    "`filtered_standard_post_QC.csv` and `filtered_low_post_QC.csv` re-synced to Step-6d sample set: standard %d rows, low %d rows.\n\n",
+    nrow(filtered_standard), nrow(filtered_low)
+  ))
 
 } else {
   cat("*Skipped (include_derived_covariates = FALSE)*\n\n")

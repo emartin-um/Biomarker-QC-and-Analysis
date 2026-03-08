@@ -21,6 +21,7 @@ Control pipeline behavior via the YAML `params:` block or at render time:
 | `include_derived_covariates` | `true` | Run Step 6 (CDX_collapsed, Ancestry, APOE4 variables) |
 | `include_derived_biomarkers` | `false` | Run Step 7 (APOE4_minus_APOE, ABeta42_minus_ABeta40) |
 | `filter_na_covars` | `true` | Exclude rows where CDX_collapsed or Ancestry is NA after grouping |
+| `output_dir` | `"output_files"` | Output directory for all pipeline files (created if absent) |
 
 To override at render time:
 ```r
@@ -43,6 +44,9 @@ quarto::quarto_render("Metadata_Merge_Pipeline.qmd",
 
 ### `Metadata_Merge_Pipeline.qmd`
 Main pipeline document. See **Pipeline Steps** below.
+
+### `combine_metadata.R`
+Standalone helper script for combining multiple metadata source files before a pipeline run. Reads source CSVs/XLSXs from `Datasets/`, adds a `metadata_source` column to each, combines with `bind_rows()`, and writes the result to `Datasets/`. Run this from the `Metadata_Merge/` directory in RStudio, then copy the output into `input_files/` before rendering the pipeline. Do not overwrite the source files.
 
 ### `covariate_explorer.R`
 Utility library sourced automatically by the pipeline. Provides config-driven functions for exploring covariate distributions and applying grouping decisions. Key functions:
@@ -74,7 +78,7 @@ Merges biomarker data with metadata. `APOE.geno` is normalized at this step from
 Identifies: duplicate samples (keeps most recent run), implausible values (age, BMI, weight, height), illogical Race/Ethnicity combinations (flagged for review, not auto-excluded).
 
 ### Step 4 — Apply Exclusion Filters
-Removes auto-excluded samples; writes filtered CSVs. Exclusion report can be manually edited before re-running in filter-only mode.
+Removes auto-excluded samples; writes preliminary filtered CSVs. Exclusion report can be manually edited before re-running in filter-only mode. Note: `filtered_standard_post_QC.csv` and `filtered_low_post_QC.csv` are overwritten again at Step 6d after covariate-driven exclusions are applied.
 
 ### Step 5 — Exclusion Summary
 Reports sample counts before/after filtering.
@@ -83,10 +87,10 @@ Reports sample counts before/after filtering.
 
 Config-driven, designed to be re-configured for each new dataset. Four sub-steps:
 
-- **6a Explore**: Prints CDX distribution and Group × Race × Ethnicity combinations to inform grouping decisions.
+- **6a Explore**: Normalizes the `Group` column (actual `NA` → string `"NA"`) so ancestry rules match datasets that lack a Group assignment, then prints CDX distribution and Group × Race × Ethnicity combinations to inform grouping decisions.
 - **6b Config**: User-editable block defining `dx_config` (diagnosis grouping) and `ancestry_config` (ancestry grouping) using `make_category_config()` / `make_grouping_config()`. **Edit this block when processing a new dataset.**
 - **6c Preview**: Shows decision tables and any unmatched rows *before* applying anything — no data is modified.
-- **6d Apply**: Applies configs, joins WGS APOE genotypes, computes APOE4 carrier variables, validates group sizes, saves updated CSV.
+- **6d Apply**: Applies configs, joins WGS APOE genotypes, computes APOE4 carrier variables, validates group sizes, saves updated CSV. Also re-filters `filtered_standard_post_QC.csv` and `filtered_low_post_QC.csv` to match the final sample set (overwriting the Step 4 versions), so all three filtered files share the same sample universe.
 
 Derived columns produced:
 
@@ -111,7 +115,7 @@ Adds log2 difference columns: `APOE4_minus_APOE` and `ABeta42_minus_ABeta40`.
 
 ### Step 8 — Save RDS
 
-Writes `output_files/preprocessed_data.rds`:
+Writes `preprocessed_data.rds` to `output_dir` (default: `output_files/`):
 ```r
 list(
   data           = filtered_combined,   # all rows/columns after steps 1–7
@@ -136,7 +140,7 @@ Place in `input_files/` (not tracked in git):
 
 ## Output Files
 
-Generated in `output_files/` (not tracked in git):
+Generated in `output_dir` (default: `output_files/`, not tracked in git):
 
 | File | Description |
 |---|---|
@@ -168,18 +172,18 @@ Metadata_Merge/input_files/
             │
             ▼ Metadata_Merge_Pipeline.qmd (Steps 1–5)
 
-Metadata_Merge/output_files/
+Metadata_Merge/{output_dir}/            ← default: output_files/
     ├── merged_*.csv
     └── sample_exclusion_report.csv  ← Review/edit if needed
             │
             ▼ Step 6 (covariate groupings) + Step 7 (derived biomarkers)
 
-Metadata_Merge/output_files/filtered/
+Metadata_Merge/{output_dir}/filtered/
     └── filtered_combined_post_QC.csv  ← with CDX_collapsed, Ancestry, APOE.geno_final, APOE_WGS_changed, APOE4_carrier, APOE4_count
             │
             ▼ Step 8
 
-Metadata_Merge/output_files/
+Metadata_Merge/{output_dir}/
     └── preprocessed_data.rds  ← downstream analysis input
 ```
 
