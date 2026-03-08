@@ -16,6 +16,7 @@ params:
   include_derived_covariates: true
   include_derived_biomarkers: false
   filter_na_covars: true
+  output_dir: "output_files"
 editor: visual
 ---
 
@@ -30,7 +31,7 @@ library(kableExtra)
 # Configuration
 PRIMARY_QC_OUTPUT <- "../Primary_QC/output_files"
 INPUT_DIR <- "input_files"
-OUTPUT_DIR <- "output_files"
+OUTPUT_DIR <- params$output_dir
 NPQ_STANDARD_FILE <- "NPQ_post_QC.csv"
 NPQ_LOW_FILE <- "NPQ_Low_post_QC.csv"
 NPQ_DATE_PATTERN <- NULL  # Set to specific date or NULL for auto-detect
