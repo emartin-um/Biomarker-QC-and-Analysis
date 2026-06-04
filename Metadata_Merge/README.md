@@ -8,7 +8,7 @@ Merges post-QC biomarker data with sample metadata, applies exclusion filters, d
 
 Open `Metadata_Merge_Pipeline.qmd` in RStudio and click **Render** (or press Ctrl/Cmd+Shift+K).
 
-The pipeline runs in 8 steps and generates an HTML report with all decisions documented.
+The pipeline runs in 9 steps and generates an HTML report with all decisions documented.
 
 ### Render Parameters
 
@@ -113,16 +113,42 @@ When `filter_na_covars = true` (default), rows where CDX_collapsed or Ancestry i
 
 Adds log2 difference columns: `APOE4_minus_APOE` and `ABeta42_minus_ABeta40`.
 
-### Step 8 — Save RDS
+### Step 8 — Longitudinal Handling (Cross-Sectional vs Longitudinal Datasets)
+
+Resolves **subject-level longitudinal repeats** — the same subject (`Record_ID`) sampled at
+different visits (different `SAMPLE`). (This is distinct from the Step 3 SAMPLE-level dedup, which
+collapses *same-sample reruns* — the same physical sample assayed in multiple runs, identical
+metadata — keeping the most recent run.)
+
+Adds four per-subject flag columns, then writes **two datasets** so each analysis uses the right one:
+
+| Column | Type | Description |
+|---|---|---|
+| `n_visits` | integer | Number of visits (distinct samples) for this subject |
+| `is_repeat_subject` | logical | TRUE if `n_visits > 1` |
+| `subject_visit_n` | integer | Visit index, 1 = earliest by `age_at_subject` |
+| `is_most_recent` | logical | TRUE for the latest visit (the cross-sectional pick) |
+
+| Output | Contents | Use for |
+|---|---|---|
+| `filtered_combined_post_QC.csv` | **DEFAULT — cross-sectional**: one row per subject (the most recent visit) | All cross-sectional analyses (no double-counting) |
+| `filtered_combined_longitudinal.csv` | **Longitudinal-only**: every visit of subjects with ≥2 visits | Trajectory / conversion analyses |
+
+The report prints a longitudinal-subjects table with a neutral `cdx_changed` flag (diagnosis change
+across visits is surfaced, not treated as an error). `preprocessed_data.rds` (Step 9) is built from
+the cross-sectional default.
+
+### Step 9 — Save RDS
 
 Writes `preprocessed_data.rds` to `output_dir` (default: `output_files/`):
 ```r
 list(
-  data           = filtered_combined,   # all rows/columns after steps 1–7
+  data           = filtered_combined,   # cross-sectional default (one row per subject) after Step 8
   biomarker_cols = biomarker_cols       # character vector of NPQ biomarker column names
 )
 ```
-This RDS is the primary input for downstream analysis pipelines (e.g., APOE_Amyloid_Tau).
+This RDS is the primary input for downstream analysis pipelines (e.g., APOE_Amyloid_Tau). For
+longitudinal analyses, read `filtered/filtered_combined_longitudinal.csv` instead.
 
 ---
 
@@ -149,10 +175,11 @@ Generated in `output_dir` (default: `output_files/`, not tracked in git):
 | `merged_combined_post_QC.csv` | All biomarkers + metadata |
 | `sample_exclusion_report.csv` | Exclusion flags and reasons per sample |
 | `samples_not_in_metadata.csv` | NPQ samples missing from metadata (if any) |
-| `filtered/filtered_standard_post_QC.csv` | Filtered standard biomarkers |
-| `filtered/filtered_low_post_QC.csv` | Filtered low biomarkers |
-| `filtered/filtered_combined_post_QC.csv` | Filtered combined (+ derived columns if enabled) |
-| `preprocessed_data.rds` | R list: `$data` + `$biomarker_cols` — primary downstream input |
+| `filtered/filtered_standard_post_QC.csv` | Filtered standard biomarkers (all sample rows) |
+| `filtered/filtered_low_post_QC.csv` | Filtered low biomarkers (all sample rows) |
+| `filtered/filtered_combined_post_QC.csv` | **DEFAULT cross-sectional** — combined biomarkers + derived/flag columns, **one row per subject** (most recent visit) |
+| `filtered/filtered_combined_longitudinal.csv` | **Longitudinal-only** — every visit of subjects with ≥2 visits |
+| `preprocessed_data.rds` | R list: `$data` (cross-sectional default) + `$biomarker_cols` — primary downstream input |
 
 ---
 
@@ -179,12 +206,18 @@ Metadata_Merge/{output_dir}/            ← default: output_files/
             ▼ Step 6 (covariate groupings) + Step 7 (derived biomarkers)
 
 Metadata_Merge/{output_dir}/filtered/
-    └── filtered_combined_post_QC.csv  ← with CDX_collapsed, Ancestry, APOE.geno_final, APOE_WGS_changed, APOE4_carrier, APOE4_count
+    └── (combined + CDX_collapsed, Ancestry, APOE.geno_final, APOE_WGS_changed, APOE4_carrier, APOE4_count)
             │
-            ▼ Step 8
+            ▼ Step 8 (longitudinal flags + split)
+
+Metadata_Merge/{output_dir}/filtered/
+    ├── filtered_combined_post_QC.csv       ← DEFAULT cross-sectional (one row/subject, most recent)
+    └── filtered_combined_longitudinal.csv  ← longitudinal-only (≥2-visit subjects, all visits)
+            │
+            ▼ Step 9
 
 Metadata_Merge/{output_dir}/
-    └── preprocessed_data.rds  ← downstream analysis input
+    └── preprocessed_data.rds  ← downstream analysis input (cross-sectional default)
 ```
 
 ---
@@ -192,8 +225,14 @@ Metadata_Merge/{output_dir}/
 ## Exclusion Logic
 
 ### Auto-Excluded (Steps 3–4)
-- **Duplicate samples**: Older runs excluded, most recent kept
+- **Same-sample reruns** (same `SAMPLE`, multiple `RUN`s, identical metadata): older runs excluded,
+  most recent run kept. These are assay re-runs, **not** the study's designed technical replicates.
 - **Implausible values**: Age, BMI, weight, height outside plausible ranges
+
+### Subject-Level Longitudinal Repeats (Step 8 — not excluded, split into two datasets)
+- The same subject (`Record_ID`) sampled at different visits (different `SAMPLE`) is **kept**. The
+  cross-sectional default keeps the most recent visit per subject; all visits go to the separate
+  longitudinal dataset. See **Step 8** above.
 
 ### Flagged for Review — Not Auto-Excluded (Step 3)
 - **Illogical Race/Ethnicity combinations**: Flagged with note; manually set `exclude = TRUE` in the exclusion report if needed

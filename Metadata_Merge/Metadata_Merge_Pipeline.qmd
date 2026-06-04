@@ -16,7 +16,7 @@ params:
   include_derived_covariates: true
   include_derived_biomarkers: false
   filter_na_covars: true
-  output_dir: "output_files_n2850_2026Mar"
+  output_dir: "output_files_n2851_2026May"
 editor: visual
 ---
 
@@ -64,7 +64,8 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 5.  **Exclusion Summary** - Review filtered sample counts
 6.  **Covariate Groupings** *(optional: `include_derived_covariates`, default TRUE)* — explore distributions (6a), define configs (6b), preview decisions (6c), apply + validate + filter (6d); joins WGS APOE genotypes, produces CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final (WGS preferred), APOE4_carrier, APOE4_count; rows excluded by default when either covariate is NA (`filter_na_covars`)
 7.  **Derived Biomarkers** *(optional: `include_derived_biomarkers`, default FALSE)* - APOE4_minus_APOE, ABeta42_minus_ABeta40
-8.  **Save RDS** - Write `preprocessed_data.rds` with data + biomarker_cols
+8.  **Longitudinal Handling** - Flag repeat-subject visits; write the cross-sectional **default** (`filtered_combined_post_QC.csv`, one-per-subject = most recent) and a separate **longitudinal** dataset (`filtered_combined_longitudinal.csv`)
+9.  **Save RDS** - Write `preprocessed_data.rds` (cross-sectional default) with data + biomarker_cols
 
 ```{r}
 #| label: mode-display
@@ -671,6 +672,8 @@ if (INCLUDE_DERIVED_COVARS) {
 
 ## Step 6b: Define Grouping Configs
 
+\*\* Pedro is checking on "Dementia" and "Cognitively Impaired" from PER. For now I am calling them Other Dementia
+
 ```{r}
 #| label: step6b-configs
 
@@ -685,7 +688,7 @@ if (INCLUDE_DERIVED_COVARS) {
     collapse = list(
       "AD" = c("AD", "Alzheimers Disease"),
       "NCI" = c("NCI", "Non - Cognitively Impaired"),
-      "Dementia_Other" = c("Dementia Undetermined", "Dementia Vascular", "Dementia Other", "Dementia", "Cognitively Impaired")
+      "Dementia_Other" = c("Dementia Undetermined","Dementia – Undetermined", "Dementia Vascular", "Dementia – Vascular", "Dementia Other", "Cognitively Impaired", "Dementia")
     ),
     exclude  = c("0", "Other", "Insufficient Data", "NA")
   )
@@ -708,7 +711,9 @@ if (INCLUDE_DERIVED_COVARS) {
       "HI_BL" = list(Group = "AA", Ethnicity = "HI"),
       "HI_BL" = list(Group = "NA", Race = "BL", Ethnicity= "HI"),
       "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "BL"),
-      "AA" = list(Group = "NA", Race = "BL", Ethnicity= "NH"),
+      "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "MU"),
+      "AA"    = list(Group = "NA", Race = "BL", Ethnicity= "NH"),
+      "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "WH"),
       "AFDC"  = list(Group = "AFDC")
     )
   )
@@ -784,10 +789,13 @@ if (INCLUDE_DERIVED_COVARS) {
 
   # ---- Join WGS APOE genotypes ----
   # WGS is the gold standard; used where available, original APOE.geno as fallback.
-  wgs_path <- file.path("..", "Secondary_QC", "APOE",
-                        "U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv")
+  # Updated May 2026: now reads from n2871 metadata file which includes 1,732 WGS
+  # genotypes (superset of the previous 502-sample lookup).
+  wgs_path <- file.path(INPUT_DIR,
+                        "U19_otherprojects_metadata_combined_APOE_WGS_n2871_May2026.csv")
   wgs_lookup <- read_csv(wgs_path, show_col_types = FALSE) %>%
     select(SAMPLE_ALIQUOT, APOE_WGS) %>%
+    filter(!is.na(APOE_WGS)) %>%
     distinct() %>%
     mutate(
       APOE_WGS_norm = if_else(
@@ -797,7 +805,10 @@ if (INCLUDE_DERIVED_COVARS) {
       )
     )
 
+  # Drop any APOE_WGS column already present (carried over from metadata that now
+  # includes this column) so the join below doesn't create .x/.y duplicates.
   filtered_combined <- filtered_combined %>%
+    select(-any_of("APOE_WGS")) %>%
     left_join(wgs_lookup, by = "SAMPLE_ALIQUOT")
 
   # APOE4 carrier variables — derived from WGS-corrected genotype where available
@@ -808,13 +819,14 @@ if (INCLUDE_DERIVED_COVARS) {
                          (APOE.geno != APOE_WGS_norm),
       # Best available genotype: WGS takes priority, fall back to original
       APOE.geno_final  = coalesce(APOE_WGS_norm, APOE.geno),
-      APOE4_carrier    = grepl("4", APOE.geno_final),
       APOE4_count      = case_when(
         grepl("4.*4", APOE.geno_final) ~ 2L,
         grepl("4",    APOE.geno_final) ~ 1L,
         !is.na(APOE.geno_final)        ~ 0L,
         TRUE                           ~ NA_integer_
-      )
+      ),
+      # Derived from APOE4_count so NA propagates consistently
+      APOE4_carrier    = APOE4_count >= 1L
     )
 
   cat(sprintf(
@@ -924,6 +936,70 @@ if (INCLUDE_DERIVED_BIOMARKS) {
 }
 ```
 
+# Step 8: Longitudinal Handling — Cross-Sectional vs Longitudinal Datasets {#step8}
+
+Same-sample **reruns** (same `SAMPLE` & metadata, different biomarker `RUN` — *not* the study's designed technical replicates) are already resolved in Step 2 (most recent `RUN` kept). This step handles **longitudinal repeats** — the same subject (`Record_ID`) sampled at different visits (different `SAMPLE`).
+
+We add per-subject flags (`n_visits`, `is_repeat_subject`, `subject_visit_n` \[1 = earliest by age\], `is_most_recent`) and then write **two datasets**, so the analyst always selects the right one:
+
+-   **`filtered_combined_post_QC.csv` — DEFAULT (cross-sectional):** one row per subject, the **most recent** visit. Use for all cross-sectional analyses (no double-counting).
+-   **`filtered_combined_longitudinal.csv` — longitudinal-only:** *every* visit of subjects with ≥2 visits. Use for trajectory / conversion analyses.
+
+`preprocessed_data.rds` is built from the cross-sectional default set.
+
+```{r}
+#| label: step8-longitudinal-datasets
+#| echo: false
+#| results: asis
+
+flagged <- filtered_combined %>%
+  group_by(Record_ID) %>%
+  mutate(
+    n_visits          = dplyr::n(),
+    is_repeat_subject = n_visits > 1L,
+    subject_visit_n   = rank(age_at_subject, ties.method = "first"),  # 1 = earliest (age axis)
+    is_most_recent    = subject_visit_n == n_visits
+  ) %>%
+  ungroup()
+
+# Two datasets
+filtered_cross <- flagged %>% filter(is_most_recent)                                  # one row/subject (most recent)
+filtered_long  <- flagged %>% filter(is_repeat_subject) %>% arrange(Record_ID, subject_visit_n)  # all visits, ≥2-visit subjects
+
+write_csv(filtered_cross, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
+write_csv(filtered_long,  file.path(OUTPUT_DIR, "filtered", "filtered_combined_longitudinal.csv"))
+
+n_rep_subj <- dplyr::n_distinct(filtered_long$Record_ID)
+cat(sprintf(paste0("- All post-QC samples: **%d**\n",
+                   "- **Cross-sectional (DEFAULT, one-per-subject):** **%d** → `filtered_combined_post_QC.csv`\n",
+                   "- **Longitudinal-only (≥2 visits, all visits):** **%d** rows / **%d** subjects → `filtered_combined_longitudinal.csv`\n\n"),
+            nrow(flagged), nrow(filtered_cross), nrow(filtered_long), n_rep_subj))
+
+# DEFAULT downstream object (drives preprocessed_data.rds) = cross-sectional set
+filtered_combined <- filtered_cross
+
+if (n_rep_subj > 0) {
+  repeat_tbl <- filtered_long %>%
+    group_by(Record_ID) %>%
+    summarise(
+      n_visits = dplyr::first(n_visits),
+      ages = paste(age_at_subject[order(subject_visit_n)], collapse = " / "),
+      CDX  = paste(CDX_collapsed[order(subject_visit_n)], collapse = " / "),
+      cdx_changed = dplyr::n_distinct(CDX_collapsed) > 1,   # diagnosis differs across visits
+      RUNs = paste(RUN[order(subject_visit_n)], collapse = " / "),
+      .groups = "drop"
+    ) %>% arrange(desc(cdx_changed), Record_ID)
+
+  kable(repeat_tbl,
+        caption = "Longitudinal subjects (in `filtered_combined_longitudinal.csv`); `cdx_changed` = diagnosis differs across visits") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    print()
+
+  cat(sprintf("\n%d of %d longitudinal subject(s) have a diagnosis change across visits.\n\n",
+              sum(repeat_tbl$cdx_changed), nrow(repeat_tbl)))
+}
+```
+
 # Save preprocessed_data.rds {#save-rds}
 
 ```{r}
@@ -933,8 +1009,10 @@ if (INCLUDE_DERIVED_BIOMARKS) {
 # Biomarker cols = everything from NPQ files (not in original metadata, not pipeline-derived,
 #   and not NPQ run-level tracking columns)
 pipeline_derived_cols <- c("CDX_collapsed", "Ancestry",
-                           "APOE4_carrier", "APOE4_count",
-                           "APOE4_minus_APOE", "ABeta42_minus_ABeta40")
+                           "APOE_WGS", "APOE_WGS_norm", "APOE_WGS_changed",
+                           "APOE.geno_final", "APOE4_carrier", "APOE4_count",
+                           "APOE4_minus_APOE", "ABeta42_minus_ABeta40",
+                           "n_visits", "is_repeat_subject", "subject_visit_n", "is_most_recent")
 npq_run_cols <- c("___1", "Run", "Bay")   # NPQ instrument metadata, not protein measurements
 biomarker_cols <- setdiff(
   names(filtered_combined),

@@ -35,6 +35,10 @@ Univariate association analysis for high-quality biomarkers.
 2. `../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv` - Direct fallback
 3. Manual merge from `NPQ_[date]_post_QC.csv` + `U19_Alamar_metadata_[date].csv` (legacy)
 
+> As of Metadata_Merge **Step 8**, `filtered_combined_post_QC.csv` is **cross-sectional — one row
+> per subject** (most recent visit), which is correct for association analyses. For longitudinal
+> work use `../Metadata_Merge/output_files/filtered/filtered_combined_longitudinal.csv`.
+
 **Output Files:**
 - `biomarker_groups.csv` - Cluster assignments for biomarkers
 - `meta_plus_race_dx.csv` - Merged biomarker + metadata for downstream analysis

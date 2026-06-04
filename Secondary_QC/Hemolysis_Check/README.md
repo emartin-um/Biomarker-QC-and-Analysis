@@ -35,6 +35,11 @@ Comprehensive hemolysis analysis including:
 - `input_files/filtered_combined_post_QC.csv` (primary)
 - Falls back to `../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv`
 
+> **Heads up (Metadata_Merge Step 8):** `filtered_combined_post_QC.csv` is now **cross-sectional —
+> one row per subject** (most recent visit). Hemolysis QC is *per-sample*; if you want to screen
+> **every assayed sample** (including earlier visits of repeat subjects), read
+> `merged_combined_post_QC.csv` or `filtered_combined_longitudinal.csv` instead.
+
 ### Technical Replicates
 - `../Primary_QC/output_files/hihg_reps_NPQ.csv` - HIHG replicate samples for baseline variance
 
