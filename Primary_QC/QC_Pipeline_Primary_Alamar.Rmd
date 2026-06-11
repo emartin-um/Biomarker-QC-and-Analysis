@@ -278,24 +278,29 @@ This is focused on generating the most stringent, high-quality biomarker dataset
 ### C.1.1 Low Detectability
 Keep only biomarkers with >98% detectability on every plate for the QC Dataset. Triage others for later inspection. Importantly, some with low detectability are not necessarily bad, e.g., APOE4 and others due to polymorphisms. They are just being temporarily removed to make a clean QC Biomarker Set.
 
-```{r detectability-filtering, message=FALSE, warning=FALSE, echo=TRUE}
+```{r detectability-filtering, message=FALSE, warning=FALSE, echo=TRUE, results='asis'}
 library(tidyverse)
 
 # Read detectability
 detect <- read_csv("input_files/biomarker_detectability.csv", show_col_types = FALSE)
 
 # Keep only the numeric plate columns and overall
-plate_cols <- names(detect)[-1]  # assume first column is Biomarker name
+plate_cols <- names(detect)[-1]  # first column is Biomarker name
+
+# Relative-quant metrics (Curve_Quant = "R", e.g. APOE, CRP): Alamar reports no detectability
+# or LOD, so every plate value is NA. Keep them in all datasets and exempt from detectability
+# filtering -- do NOT let an all-NA row pass via min()'s Inf.
+rel_quant <- detect$Biomarker[rowSums(!is.na(detect[plate_cols])) == 0]
 
 # Determine low-detectability biomarkers
 low_det <- detect %>%
   pivot_longer(cols = all_of(plate_cols), names_to = "Plate", values_to = "Detectability") %>%
   group_by(Biomarker) %>%
   summarize(
-    Min_Detectability = min(Detectability, na.rm = TRUE),
+    Min_Detectability = if (all(is.na(Detectability))) NA_real_ else min(Detectability, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  filter(Min_Detectability < min_detectability_qc)
+  filter(!is.na(Min_Detectability), Min_Detectability < min_detectability_qc)
 
 # Save removed biomarkers for record
 write_csv(low_det, "output_files/biomarkers_low_detectability.csv")
@@ -306,7 +311,14 @@ knitr::kable(
   caption = "Biomarkers Removed Due to Low Detectability (min detectability <98%)"
 )
 
-# For QC, keep only high-detectability biomarkers
+# Note relative-quant metrics retained without detectability filtering
+if (length(rel_quant) > 0) {
+  cat(sprintf(
+    "\n> **Note -- relative-quant metrics:** %s have `Curve_Quant = \"R\"`; Alamar reports no detectability or LOD for them. They are **retained in all datasets** and exempt from detectability/LOD filtering.\n",
+    paste(rel_quant, collapse = ", ")))
+}
+
+# For QC, keep only high-detectability biomarkers (rel_quant targets never entered low_det)
 biomarkers_keep <- setdiff(colnames(combined_df), low_det$Biomarker)
 
 combined_qc <- combined_df %>%
@@ -428,15 +440,29 @@ library(dplyr)
 #alamar_qc is the Sample_QC file read in above
 
 warn_samps <- alamar_qc %>%
-  filter(`QC Status` == "warning") %>%
+  filter(grepl("warn", `QC Status`, ignore.case = TRUE)) %>%  # values are "Passed"/"Warning" (case/wording can drift)
   left_join(
     meta_df %>% select(SampleID, Run, Bay),
     by = c("Sample Name" = "SampleID")
   )
 
-as.data.frame(warn_samps %>% select(`Sample Name`, Run, Bay, `IC Median`, Detectability, AUTO_WELLPOSITION), row.names=FALSE)
+library(kableExtra)
+warn_tbl <- warn_samps %>%
+  arrange(Run, Bay, `Sample Name`) %>%
+  transmute(`Sample Name`,
+            `IC Median`   = round(`IC Median`, 3),
+            Detectability = round(Detectability, 3),
+            `IC Reads`,
+            Well = AUTO_WELLPOSITION,
+            .grp = paste(Run, Bay))
+.grp_rle <- rle(warn_tbl$.grp)
+warn_tbl %>%
+  select(-.grp) %>%
+  kbl(caption = "Alamar Sample QC Warnings (sorted, grouped by plate)") %>%
+  kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  pack_rows(index = setNames(.grp_rle$lengths, .grp_rle$values))
 
-write_csv(warn_samps, "output_files/Alamar_QC_warn.csv")
+write_csv(arrange(warn_samps, Run, Bay, `Sample Name`), "output_files/Alamar_QC_warn.csv")
 
 ```
 
@@ -758,18 +784,24 @@ raw_df$Bay <- factor(raw_df$Bay)
 # Custom Bay colors
 bay_colors <- c("Bay1" = "red", "Bay2" = "green", "Bay3" = "blue")
 
-biom <- "mCherry"
-
-# Compute per-Run/Bay medians and flag outliers
-# Lower bound is -40% of the median or 1000, whichever is bigger
-df_temp <- raw_df %>%
-  select(SampleID = 1, Value = all_of(biom), Run, Bay) %>%
+# The IC (mCherry) is no longer a target row in the NPQ/Raw-counts export; its per-sample
+# reads now live in the Sample QC sheet as `IC Reads` (loaded above as alamar_qc). Source from
+# there, restricted to the QC sample set (samples present in raw_df).
+# Lower bound is -40% of the median or 1000, whichever is bigger.
+df_temp <- alamar_qc %>%
+  transmute(
+    SampleID = `Sample Name`,
+    Value    = as.numeric(`IC Reads`),
+    Run      = stringr::str_extract(plateID, "^[0-9]{8}-[0-9]{4}"),
+    Bay      = stringr::str_extract(plateID, "Bay[0-9]+")
+  ) %>%
+  filter(SampleID %in% raw_df[[1]]) %>%
   group_by(Run, Bay) %>%
   mutate(
     Median_Value = median(Value, na.rm = TRUE),
     Lower_Thresh = pmax((Median_Value * 0.6), 1000),
     Upper_Thresh = Median_Value * 1.4,  # +40%
-    Outlier_Flag = ifelse(Value < Lower_Thresh | Value > Upper_Thresh, TRUE, FALSE)
+    Outlier_Flag = Value < Lower_Thresh | Value > Upper_Thresh
   ) %>%
   ungroup()
 
@@ -967,6 +999,41 @@ knitr::kable(
   caption = "Summary of post-QC counts:"
 )
 
+```
+
+## D.4 Per-plate QC Summary
+One row per plate: post-QC retained count, our triaged and flagged samples, and Alamar warnings.
+
+```{r per_plate_summary, message=FALSE, warning=FALSE, echo=TRUE}
+plate_lookup <- alamar_qc %>%
+  transmute(SampleID = `Sample Name`,
+            Run = stringr::str_extract(plateID, "^[0-9]{8}-[0-9]{4}"),
+            Bay = stringr::str_extract(plateID, "Bay[0-9]+"))
+
+count_by_plate <- function(ids, nm) {
+  tibble(SampleID = unique(as.character(ids))) %>%
+    inner_join(plate_lookup, by = "SampleID") %>%
+    count(Run, Bay, name = nm)
+}
+
+plate_summary <- plate_lookup %>%
+  distinct(Run, Bay) %>%
+  left_join(qc_summary %>% rename(Retained_postQC = combined_qc_filtered), by = c("Run","Bay")) %>%
+  left_join(count_by_plate(triage_df$SampleID,       "Triaged"),         by = c("Run","Bay")) %>%
+  left_join(count_by_plate(read_outliers$SampleID,   "Flagged_Reads"),   by = c("Run","Bay")) %>%
+  left_join(count_by_plate(warn_samps$`Sample Name`, "Alamar_Warnings"), by = c("Run","Bay")) %>%
+  mutate(across(c(Retained_postQC, Triaged, Flagged_Reads, Alamar_Warnings),
+                ~ tidyr::replace_na(., 0L))) %>%
+  arrange(Run, Bay)
+
+knitr::kable(
+  plate_summary,
+  caption = "Per-plate QC summary: pipeline triage/flags vs. Alamar warnings"
+) %>%
+  kableExtra::kable_styling(full_width = TRUE,
+                            bootstrap_options = c("striped", "hover", "condensed"))
+
+write_csv(plate_summary, "output_files/per_plate_QC_summary.csv")
 ```
 
 # E. Biomarker QC

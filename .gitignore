@@ -25,6 +25,9 @@
 *~
 *.tmp
 
+# Logs (render logs, etc.)
+*.log
+
 # Generated plot files
 Rplots.pdf
 
