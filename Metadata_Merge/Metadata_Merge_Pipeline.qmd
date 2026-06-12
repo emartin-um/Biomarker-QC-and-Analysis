@@ -12,12 +12,30 @@ format:
     embed-resources: true
 params:
   filter_only: false
-  no_copy: false
+  no_copy: true
   include_derived_covariates: true
   include_derived_biomarkers: false
   filter_na_covars: true
+  output_dir: "output_files_n2851_2026May"
+  review_dir: "review"   # optional dir holding {CDX,Ancestry}_review.csv (data-driven Step 6b)
 editor: visual
 ---
+
+<!--
+CHANGELOG — Metadata_Merge_Pipeline.qmd
+  2026-06-12 (propagated from the 8-plate run copy):
+   * Step 6b is data-driven from `<review_dir>/{CDX,Ancestry}_review.csv` when present (edit the
+     FINAL_* columns to regroup); falls back to the built-in config below when the CSVs are absent.
+   * Step 6d reads APOE_WGS from the auto-detected metadata. NO WGS plate-swap correction is applied;
+     swap-affected AD-Hispanic samples are masked to Sanger via
+     ../../../May_2026_WGS_QC/WGS_chr1_corrected_idmap_2026Jun11.csv (replaces the archived
+     2026-06-08 ..._plateswapcorrected_2026Jun.csv).
+   * Step-6 chunks suppress covariate_explorer.R console side-effects and render clean kable tables.
+  PROVENANCE: older rendered reports (Metadata_Merge_Pipeline.html dated 2026-06-08, output_files_n2851_*,
+  output_files_n2850_*, etc.) were produced by EARLIER versions of this file on EARLIER metadata.
+  They are preserved, not deleted — see README.md "Report / output provenance".
+-->
+
 
 ```{r}
 #| label: setup
@@ -30,7 +48,7 @@ library(kableExtra)
 # Configuration
 PRIMARY_QC_OUTPUT <- "../Primary_QC/output_files"
 INPUT_DIR <- "input_files"
-OUTPUT_DIR <- "output_files"
+OUTPUT_DIR <- params$output_dir
 NPQ_STANDARD_FILE <- "NPQ_post_QC.csv"
 NPQ_LOW_FILE <- "NPQ_Low_post_QC.csv"
 NPQ_DATE_PATTERN <- NULL  # Set to specific date or NULL for auto-detect
@@ -63,7 +81,8 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 5.  **Exclusion Summary** - Review filtered sample counts
 6.  **Covariate Groupings** *(optional: `include_derived_covariates`, default TRUE)* — explore distributions (6a), define configs (6b), preview decisions (6c), apply + validate + filter (6d); joins WGS APOE genotypes, produces CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final (WGS preferred), APOE4_carrier, APOE4_count; rows excluded by default when either covariate is NA (`filter_na_covars`)
 7.  **Derived Biomarkers** *(optional: `include_derived_biomarkers`, default FALSE)* - APOE4_minus_APOE, ABeta42_minus_ABeta40
-8.  **Save RDS** - Write `preprocessed_data.rds` with data + biomarker_cols
+8.  **Longitudinal Handling** - Flag repeat-subject visits; write the cross-sectional **default** (`filtered_combined_post_QC.csv`, one-per-subject = most recent) and a separate **longitudinal** dataset (`filtered_combined_longitudinal.csv`)
+9.  **Save RDS** - Write `preprocessed_data.rds` (cross-sectional default) with data + biomarker_cols
 
 ```{r}
 #| label: mode-display
@@ -426,9 +445,9 @@ if (!FILTER_ONLY) {
 #| results: asis
 
 if (!FILTER_ONLY) {
-  cat("\n## Illogical Race/Ethnicity Combinations\n\n")
+  cat("\n## Unexpected Race/Ethnicity Combinations\n\n")
 
-  illogical_race_eth <- merged_combined %>%
+  unexpected_race_eth <- merged_combined %>%
     filter(
       (grepl("BL", Group_Race_Ethnicity) & grepl("WH", Group_Race_Ethnicity)) |
       (grepl("HI", Group_Race_Ethnicity) & grepl("NH", Group_Race_Ethnicity)) |
@@ -438,27 +457,27 @@ if (!FILTER_ONLY) {
       (grepl("AA", Group_Race_Ethnicity) & grepl("HI", Group_Race_Ethnicity))
     ) %>%
     mutate(
-      exclude_reason = paste0("Review: Illogical Race/Ethnicity combination: ", Group_Race_Ethnicity),
+      exclude_reason = paste0("Review: Unexpected Race/Ethnicity combination: ", Group_Race_Ethnicity),
       exclude = FALSE  # Flagged for review but NOT auto-excluded
     )
 
-  if (nrow(illogical_race_eth) > 0) {
+  if (nrow(unexpected_race_eth) > 0) {
     cat("::: {.callout-note}\n")
     cat("### Flagged for Review (Not Auto-Excluded)\n\n")
-    cat("Found **", nrow(illogical_race_eth), "** samples with potentially illogical Race/Ethnicity combinations.\n\n", sep = "")
+    cat("Found **", nrow(unexpected_race_eth), "** samples with potentially unexpected Race/Ethnicity combinations.\n\n", sep = "")
     cat("These are flagged in the exclusion report but **not automatically excluded**.\n")
     cat("Review and manually set `exclude=TRUE` if needed.\n")
     cat(":::\n\n")
 
-    kable(illogical_race_eth %>%
+    kable(unexpected_race_eth %>%
             select(SAMPLE_ALIQUOT, SAMPLE, Group, Race, Ethnicity, Group_Race_Ethnicity) %>%
             distinct(),
-          caption = "Illogical Race/Ethnicity Combinations") %>%
+          caption = "Unexpected Race/Ethnicity Combinations") %>%
       kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
       print()
 
   } else {
-    cat("No illogical combinations found. ✓\n")
+    cat("No unexpected combinations found. ✓\n")
   }
 }
 ```
@@ -509,9 +528,9 @@ if (!FILTER_ONLY) {
       select(-exclude_reason_implausible, -exclude_implausible)
   }
 
-  # Mark illogical race/ethnicity (for review, not auto-exclude)
-  if (nrow(illogical_race_eth) > 0) {
-    race_eth_combined <- illogical_race_eth %>%
+  # Mark unexpected race/ethnicity (for review, not auto-exclude)
+  if (nrow(unexpected_race_eth) > 0) {
+    race_eth_combined <- unexpected_race_eth %>%
       group_by(SAMPLE_ALIQUOT) %>%
       summarise(exclude_reason_race_eth = first(exclude_reason), .groups = "drop")
 
@@ -623,27 +642,50 @@ cat("| Combined | ", nrow(merged_combined), " | ", nrow(filtered_combined), " | 
 
 # Step 6: Covariate Groupings {#step6}
 
+```{r}
+#| label: step6-normalize
+#| include: false
+
+if (INCLUDE_DERIVED_COVARS) {
+  # Normalize ancestry columns before rule matching:
+  # 1. Trim whitespace — Excel/CSV round-trips can leave trailing spaces on
+  #    multi-word values like "BL WH" or "WH MU", causing silent rule mismatches.
+  # 2. Group NA → "NA" string — datasets without a Group assignment (e.g.
+  #    OtherProjects) store actual NA here; the rules match on the string "NA"
+  #    to classify those samples by Race + Ethnicity alone.
+  filtered_combined <- filtered_combined %>%
+    mutate(
+      across(c(Group, Race, Ethnicity), ~str_trim(as.character(.))),
+      Group = replace_na(Group, "NA")
+    )
+}
+```
+
 ## Step 6a: Explore Distributions
 
 ```{r}
 #| label: step6a-explore
 #| echo: false
 #| results: asis
+#| message: false
+#| warning: false
 
 if (INCLUDE_DERIVED_COVARS) {
   cat("Review these distributions to inform your grouping decisions in Step 6b.\n\n")
 
+  # NOTE: explore_*() print a summary to the console as a side effect; under results='asis'
+  # that pollutes the report, so capture/suppress it and render via kable instead.
   cat("### CDX (Diagnosis)\n\n")
-  explore_covariate(filtered_combined, "CDX") %>%
-    kable(col.names = c("CDX", "N", "Pct")) %>%
-    kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
-    print()
+  invisible(capture.output(suppressMessages(
+    .cdx_tab <- explore_covariate(filtered_combined, "CDX"))))
+  print(kable_styling(kable(.cdx_tab, col.names = c("CDX", "N", "Pct")),
+                      bootstrap_options = c("striped", "condensed"), full_width = FALSE))
 
   cat("\n### Group × Race × Ethnicity Combinations\n\n")
-  explore_combinations(filtered_combined, "Group", "Race", "Ethnicity") %>%
-    kable() %>%
-    kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
-    print()
+  invisible(capture.output(suppressMessages(
+    .gre_tab <- explore_combinations(filtered_combined, "Group", "Race", "Ethnicity"))))
+  print(kable_styling(kable(.gre_tab),
+                      bootstrap_options = c("striped", "condensed"), full_width = FALSE))
 } else {
   cat("*Skipped (include_derived_covariates = FALSE)*\n\n")
 }
@@ -651,21 +693,56 @@ if (INCLUDE_DERIVED_COVARS) {
 
 ## Step 6b: Define Grouping Configs
 
+\*\* Pedro is checking on "Dementia" and "Cognitively Impaired" from PER. For now I am calling them Other Dementia
+
 ```{r}
 #| label: step6b-configs
+#| message: false
+#| warning: false
 
 if (INCLUDE_DERIVED_COVARS) {
 
   # ── EDIT THIS BLOCK FOR EACH NEW DATASET ───────────────────────────────────
 
+  REVIEW_DIR <- if (is.null(params$review_dir)) "review" else params$review_dir
+  .cdx_csv <- file.path(REVIEW_DIR, "CDX_review.csv")
+  .anc_csv <- file.path(REVIEW_DIR, "Ancestry_review.csv")
+  if (file.exists(.cdx_csv) && file.exists(.anc_csv)) {
+    # DATA-DRIVEN: decisions live in the review tables' FINAL_* columns (blank = exclude)
+    .cdx_rev <- read_csv(.cdx_csv, show_col_types = FALSE) %>%
+      mutate(FINAL_CDX_collapsed = na_if(trimws(FINAL_CDX_collapsed), ""))
+    .anc_rev <- read_csv(.anc_csv, show_col_types = FALSE) %>%
+      mutate(FINAL_Ancestry = na_if(trimws(FINAL_Ancestry), ""))
+    .coll <- .cdx_rev %>% filter(!is.na(FINAL_CDX_collapsed), !is.na(CDX))
+    dx_config <- make_category_config(
+      source_col = "CDX", target_col = "CDX_collapsed", keep = character(0),
+      collapse = split(.coll$CDX, .coll$FINAL_CDX_collapsed),
+      exclude  = .cdx_rev %>% filter(is.na(FINAL_CDX_collapsed), !is.na(CDX)) %>% pull(CDX) %>% as.character()
+    )
+    .anc_keep <- .anc_rev %>% filter(!is.na(FINAL_Ancestry))
+    .anc_rules <- list()
+    for (.i in seq_len(nrow(.anc_keep))) {
+      .cond <- list(Group = .anc_keep$Group[.i], Race = .anc_keep$Race[.i], Ethnicity = .anc_keep$Ethnicity[.i])
+      .cond <- .cond[!vapply(.cond, function(v) is.na(v) || v == "", logical(1))]
+      .anc_rules <- c(.anc_rules, setNames(list(.cond), .anc_keep$FINAL_Ancestry[.i]))
+    }
+    ancestry_config <- make_grouping_config(
+      target_col = "Ancestry", other_label = "Other", exclude_other = FILTER_NA_COVARS, rules = .anc_rules
+    )
+    message("Step 6b: data-driven config from ", REVIEW_DIR)
+
+  } else {
+  # BUILT-IN DEFAULTS (used when no review CSVs are present) — edit per dataset:
   dx_config <- make_category_config(
     source_col = "CDX",
     target_col = "CDX_collapsed",
-    keep     = c("NCI", "MCI", "AD"),
+    keep     = c("MCI"),
     collapse = list(
-      "Dementia_Other" = c("Dementia Undetermined", "Dementia Vascular", "Dementia Other")
+      "AD" = c("AD", "Alzheimers Disease"),
+      "NCI" = c("NCI", "Non - Cognitively Impaired"),
+      "Dementia_Other" = c("Dementia Undetermined","Dementia – Undetermined", "Dementia Vascular", "Dementia – Vascular", "Dementia Other", "Cognitively Impaired", "Dementia")
     ),
-    exclude  = c("0", "Other", "Insufficient Data")
+    exclude  = c("0", "Other", "Insufficient Data", "NA")
   )
 
   ancestry_config <- make_grouping_config(
@@ -673,20 +750,33 @@ if (INCLUDE_DERIVED_COVARS) {
     other_label   = "Other",
     exclude_other = FILTER_NA_COVARS,
     rules = list(
+      "NH_WH" = list(Group = "NA", Race = "WH", Ethnicity= "NH"),
       "HI_WH" = list(Group = "HI", Race = "WH"),
+      "HI_WH" = list(Group = "NA", Race = "WH", Ethnicity= "HI"),
       "HI_MU" = list(Group = "HI", Race = "MU"),
-      "HI_MU" = list(Group = "HI", Race = "BL WH"),
+      "HI_MU" = list(Race = "BL WH", Ethnicity= "HI"),
+      "HI_MU" = list(Race = "BL  WH", Ethnicity= "HI"),
+      "HI_MU" = list(Race = "WH MU", Ethnicity= "HI"),
+      "HI_MU" = list(Group = "NA", Race = "MU", Ethnicity= "HI"),
+      "HI_MU" = list(Group = "NA", Race = "WH  MU", Ethnicity= "HI"),
       "HI_BL" = list(Group = "HI", Race = "BL"),
       "HI_BL" = list(Group = "AA", Ethnicity = "HI"),
+      "HI_BL" = list(Group = "NA", Race = "BL", Ethnicity= "HI"),
       "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "BL"),
+      "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "MU"),
+      "AA"    = list(Group = "NA", Race = "BL", Ethnicity= "NH"),
+      "AA"    = list(Group = "AA", Ethnicity = "NH", Race = "WH"),
       "AFDC"  = list(Group = "AFDC")
     )
   )
+  }  # end built-in-defaults fallback (the data-driven branch sets the configs above)
 
   # ───────────────────────────────────────────────────────────────────────────
 
-  print_config(dx_config)
-  print_config(ancestry_config)
+  invisible(capture.output(suppressMessages({
+    print_config(dx_config)
+    print_config(ancestry_config)
+  })))
 }
 ```
 
@@ -696,11 +786,13 @@ if (INCLUDE_DERIVED_COVARS) {
 #| label: step6c-preview
 #| echo: false
 #| results: asis
+#| message: false
+#| warning: false
 
 if (INCLUDE_DERIVED_COVARS) {
   cat("### Diagnosis (CDX → CDX_collapsed)\n\n")
   dx_summary <- summarize_category_decisions(filtered_combined, dx_config)
-  kable(dx_summary$all, caption = "CDX decision summary") %>%
+  kable(dx_summary$all %>% arrange(maps_to, desc(n)), caption = "CDX decision summary (sorted by maps_to)") %>%
     kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
     print()
 
@@ -712,6 +804,23 @@ if (INCLUDE_DERIVED_COVARS) {
   kable(anc_summary$group_summary, caption = "Ancestry group summary") %>%
     kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
     print()
+
+  # Explicit combo -> Ancestry mapping (parallel to the CDX raw -> collapsed table)
+  cat("\n**Ancestry mapping — Group × Race × Ethnicity → Ancestry**\n\n")
+  .anc_map_csv <- file.path(if (exists("REVIEW_DIR")) REVIEW_DIR else "review", "Ancestry_review.csv")
+  if (file.exists(.anc_map_csv)) {
+    print(kable_styling(kable(
+      suppressMessages(read_csv(.anc_map_csv, show_col_types = FALSE)) %>%
+        select(any_of(c("Group","Race","Ethnicity","n_in_batch","FINAL_Ancestry","unexpected_race_eth"))) %>%
+        arrange(FINAL_Ancestry, desc(n_in_batch)),
+      caption = "Ancestry mapping (source: Ancestry_review.csv FINAL_Ancestry; blank = excluded)"),
+      bootstrap_options = c("striped", "condensed"), full_width = FALSE))
+  } else {
+    print(kable_styling(kable(
+      filtered_combined %>% count(Group, Race, Ethnicity, Ancestry) %>% arrange(Ancestry, desc(n)),
+      caption = "Ancestry mapping (applied: Group × Race × Ethnicity → Ancestry)"),
+      bootstrap_options = c("striped", "condensed"), full_width = FALSE))
+  }
 
   if (nrow(anc_summary$unmatched) > 0) {
     cat("\n::: {.callout-warning}\n")
@@ -732,6 +841,8 @@ if (INCLUDE_DERIVED_COVARS) {
 #| label: step6d-apply
 #| echo: false
 #| results: asis
+#| message: false
+#| warning: false
 
 if (INCLUDE_DERIVED_COVARS) {
   n_before <- nrow(filtered_combined)
@@ -752,23 +863,42 @@ if (INCLUDE_DERIVED_COVARS) {
   cat(sprintf("**Rows before grouping:** %d | **After:** %d | **Removed:** %d\n\n",
               n_before, n_after, n_before - n_after))
 
-  # ---- Join WGS APOE genotypes ----
-  # WGS is the gold standard; used where available, original APOE.geno as fallback.
-  wgs_path <- file.path("..", "Secondary_QC", "APOE",
-                        "U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv")
-  wgs_lookup <- read_csv(wgs_path, show_col_types = FALSE) %>%
-    select(SAMPLE_ALIQUOT, APOE_WGS) %>%
-    distinct() %>%
-    mutate(
-      APOE_WGS_norm = if_else(
-        !is.na(APOE_WGS) & nchar(trimws(APOE_WGS)) == 2,
-        paste0(substr(trimws(APOE_WGS), 1, 1), "/", substr(trimws(APOE_WGS), 2, 2)),
-        NA_character_
+  # ---- Join WGS APOE genotypes (NO plate-swap correction applied) ----
+  # WGS is read from the same auto-detected metadata; used where available, Sanger APOE.geno as
+  # fallback. The 2026-06 AD-Hispanic WGS plate-swap is NOT corrected here (the 2026-06-08
+  # ..._plateswapcorrected_2026Jun.csv was wrong and is archived); instead the swap-affected
+  # samples are masked below so APOE.geno_final falls back to Sanger for them, pending USUHS
+  # confirmation. See ../../../May_2026_WGS_QC/WGS_Plate_Swap_Summary_2026Jun11.md.
+  wgs_src <- read_csv(metadata_file, show_col_types = FALSE)
+  if ("APOE_WGS" %in% names(wgs_src)) {
+    wgs_lookup <- wgs_src %>%
+      select(SAMPLE_ALIQUOT, APOE_WGS) %>%
+      filter(!is.na(APOE_WGS)) %>%
+      distinct() %>%
+      mutate(
+        APOE_WGS_norm = if_else(
+          !is.na(APOE_WGS) & nchar(trimws(APOE_WGS)) == 2,
+          paste0(substr(trimws(APOE_WGS), 1, 1), "/", substr(trimws(APOE_WGS), 2, 2)),
+          NA_character_
+        )
       )
-    )
+  } else {
+    wgs_lookup <- tibble(SAMPLE_ALIQUOT = character(), APOE_WGS_norm = character())
+  }
 
+  # Drop any APOE_WGS column already present so the join doesn't create .x/.y duplicates.
   filtered_combined <- filtered_combined %>%
+    select(-any_of("APOE_WGS")) %>%
     left_join(wgs_lookup, by = "SAMPLE_ALIQUOT")
+
+  # Mask swap-affected AD-Hispanic samples -> APOE.geno_final falls back to Sanger for them.
+  .swap_idmap <- "../../../May_2026_WGS_QC/WGS_chr1_corrected_idmap_2026Jun11.csv"
+  if (file.exists(.swap_idmap)) {
+    .affected <- read_csv(.swap_idmap, show_col_types = FALSE)$SAMPLE_aslabeled
+    filtered_combined <- filtered_combined %>%
+      mutate(APOE_WGS_norm = if_else(as.character(SAMPLE) %in% as.character(.affected),
+                                     NA_character_, APOE_WGS_norm))
+  }
 
   # APOE4 carrier variables — derived from WGS-corrected genotype where available
   filtered_combined <- filtered_combined %>%
@@ -778,13 +908,14 @@ if (INCLUDE_DERIVED_COVARS) {
                          (APOE.geno != APOE_WGS_norm),
       # Best available genotype: WGS takes priority, fall back to original
       APOE.geno_final  = coalesce(APOE_WGS_norm, APOE.geno),
-      APOE4_carrier    = grepl("4", APOE.geno_final),
       APOE4_count      = case_when(
         grepl("4.*4", APOE.geno_final) ~ 2L,
         grepl("4",    APOE.geno_final) ~ 1L,
         !is.na(APOE.geno_final)        ~ 0L,
         TRUE                           ~ NA_integer_
-      )
+      ),
+      # Derived from APOE4_count so NA propagates consistently
+      APOE4_carrier    = APOE4_count >= 1L
     )
 
   cat(sprintf(
@@ -795,10 +926,33 @@ if (INCLUDE_DERIVED_COVARS) {
   ))
 
   cat("### Final Group Sizes (CDX_collapsed × Ancestry)\n\n")
-  validate_groups(filtered_combined, c("CDX_collapsed", "Ancestry"), min_n = 5)
+  # validate_groups() prints to the console (mangled under asis); capture it and render a clean cross-tab.
+  invisible(capture.output(suppressMessages(
+    validate_groups(filtered_combined, c("CDX_collapsed", "Ancestry"), min_n = 5))))
+  print(kable_styling(
+    kable(filtered_combined %>%
+            count(CDX_collapsed, Ancestry) %>%
+            tidyr::pivot_wider(names_from = Ancestry, values_from = n, values_fill = 0),
+          caption = "Final group sizes: CDX_collapsed × Ancestry"),
+    bootstrap_options = c("striped", "condensed"), full_width = FALSE))
 
   write_csv(filtered_combined, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
   cat("\n`filtered_combined_post_QC.csv` updated with CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final, APOE4_carrier, APOE4_count.\n\n")
+
+  # Sync standard and low CSVs to the final Step-6d sample set.
+  # filtered_combined has been further filtered by ancestry/CDX grouping
+  # (apply_grouping_config + FILTER_NA_COVARS). Standard and low were written
+  # at Step 5 before this filtering; re-filter them now so all three files
+  # share the same sample universe.
+  passing_ids       <- filtered_combined$SAMPLE_ALIQUOT
+  filtered_standard <- filtered_standard %>% filter(SAMPLE_ALIQUOT %in% passing_ids)
+  filtered_low      <- filtered_low      %>% filter(SAMPLE_ALIQUOT %in% passing_ids)
+  write_csv(filtered_standard, file.path(OUTPUT_DIR, "filtered", "filtered_standard_post_QC.csv"))
+  write_csv(filtered_low,      file.path(OUTPUT_DIR, "filtered", "filtered_low_post_QC.csv"))
+  cat(sprintf(
+    "`filtered_standard_post_QC.csv` and `filtered_low_post_QC.csv` re-synced to Step-6d sample set: standard %d rows, low %d rows.\n\n",
+    nrow(filtered_standard), nrow(filtered_low)
+  ))
 
 } else {
   cat("*Skipped (include_derived_covariates = FALSE)*\n\n")
@@ -879,6 +1033,70 @@ if (INCLUDE_DERIVED_BIOMARKS) {
 }
 ```
 
+# Step 8: Longitudinal Handling — Cross-Sectional vs Longitudinal Datasets {#step8}
+
+Same-sample **reruns** (same `SAMPLE` & metadata, different biomarker `RUN` — *not* the study's designed technical replicates) are already resolved in Step 2 (most recent `RUN` kept). This step handles **longitudinal repeats** — the same subject (`Record_ID`) sampled at different visits (different `SAMPLE`).
+
+We add per-subject flags (`n_visits`, `is_repeat_subject`, `subject_visit_n` \[1 = earliest by age\], `is_most_recent`) and then write **two datasets**, so the analyst always selects the right one:
+
+-   **`filtered_combined_post_QC.csv` — DEFAULT (cross-sectional):** one row per subject, the **most recent** visit. Use for all cross-sectional analyses (no double-counting).
+-   **`filtered_combined_longitudinal.csv` — longitudinal-only:** *every* visit of subjects with ≥2 visits. Use for trajectory / conversion analyses.
+
+`preprocessed_data.rds` is built from the cross-sectional default set.
+
+```{r}
+#| label: step8-longitudinal-datasets
+#| echo: false
+#| results: asis
+
+flagged <- filtered_combined %>%
+  group_by(Record_ID) %>%
+  mutate(
+    n_visits          = dplyr::n(),
+    is_repeat_subject = n_visits > 1L,
+    subject_visit_n   = rank(age_at_subject, ties.method = "first"),  # 1 = earliest (age axis)
+    is_most_recent    = subject_visit_n == n_visits
+  ) %>%
+  ungroup()
+
+# Two datasets
+filtered_cross <- flagged %>% filter(is_most_recent)                                  # one row/subject (most recent)
+filtered_long  <- flagged %>% filter(is_repeat_subject) %>% arrange(Record_ID, subject_visit_n)  # all visits, ≥2-visit subjects
+
+write_csv(filtered_cross, file.path(OUTPUT_DIR, "filtered", "filtered_combined_post_QC.csv"))
+write_csv(filtered_long,  file.path(OUTPUT_DIR, "filtered", "filtered_combined_longitudinal.csv"))
+
+n_rep_subj <- dplyr::n_distinct(filtered_long$Record_ID)
+cat(sprintf(paste0("- All post-QC samples: **%d**\n",
+                   "- **Cross-sectional (DEFAULT, one-per-subject):** **%d** → `filtered_combined_post_QC.csv`\n",
+                   "- **Longitudinal-only (≥2 visits, all visits):** **%d** rows / **%d** subjects → `filtered_combined_longitudinal.csv`\n\n"),
+            nrow(flagged), nrow(filtered_cross), nrow(filtered_long), n_rep_subj))
+
+# DEFAULT downstream object (drives preprocessed_data.rds) = cross-sectional set
+filtered_combined <- filtered_cross
+
+if (n_rep_subj > 0) {
+  repeat_tbl <- filtered_long %>%
+    group_by(Record_ID) %>%
+    summarise(
+      n_visits = dplyr::first(n_visits),
+      ages = paste(age_at_subject[order(subject_visit_n)], collapse = " / "),
+      CDX  = paste(CDX_collapsed[order(subject_visit_n)], collapse = " / "),
+      cdx_changed = dplyr::n_distinct(CDX_collapsed) > 1,   # diagnosis differs across visits
+      RUNs = paste(RUN[order(subject_visit_n)], collapse = " / "),
+      .groups = "drop"
+    ) %>% arrange(desc(cdx_changed), Record_ID)
+
+  kable(repeat_tbl,
+        caption = "Longitudinal subjects (in `filtered_combined_longitudinal.csv`); `cdx_changed` = diagnosis differs across visits") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    print()
+
+  cat(sprintf("\n%d of %d longitudinal subject(s) have a diagnosis change across visits.\n\n",
+              sum(repeat_tbl$cdx_changed), nrow(repeat_tbl)))
+}
+```
+
 # Save preprocessed_data.rds {#save-rds}
 
 ```{r}
@@ -888,8 +1106,10 @@ if (INCLUDE_DERIVED_BIOMARKS) {
 # Biomarker cols = everything from NPQ files (not in original metadata, not pipeline-derived,
 #   and not NPQ run-level tracking columns)
 pipeline_derived_cols <- c("CDX_collapsed", "Ancestry",
-                           "APOE4_carrier", "APOE4_count",
-                           "APOE4_minus_APOE", "ABeta42_minus_ABeta40")
+                           "APOE_WGS", "APOE_WGS_norm", "APOE_WGS_changed",
+                           "APOE.geno_final", "APOE4_carrier", "APOE4_count",
+                           "APOE4_minus_APOE", "ABeta42_minus_ABeta40",
+                           "n_visits", "is_repeat_subject", "subject_visit_n", "is_most_recent")
 npq_run_cols <- c("___1", "Run", "Bay")   # NPQ instrument metadata, not protein measurements
 biomarker_cols <- setdiff(
   names(filtered_combined),
@@ -906,6 +1126,141 @@ saveRDS(
 
 message(sprintf("Saved preprocessed_data.rds: %d samples, %d biomarker cols",
                 nrow(filtered_combined), length(biomarker_cols)))
+```
+
+# QC / Error Reports & Mapping Keys {#reports}
+
+Per-issue error reports (with metadata context, for sending to the contributing groups) and the
+grouping decisions as shareable keys. CSVs go to `<output_dir>/reports/`. Checks run on the full
+batch present in metadata, so issues are surfaced even for samples that are later excluded.
+
+```{r}
+#| label: step-qc-reports
+#| echo: false
+#| results: asis
+#| message: false
+#| warning: false
+
+if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
+  REPORTS_DIR <- file.path(OUTPUT_DIR, "reports")
+  dir.create(REPORTS_DIR, showWarnings = FALSE, recursive = TRUE)
+  .review_dir <- if (exists("REVIEW_DIR")) REVIEW_DIR else if (!is.null(params$review_dir)) params$review_dir else "review"
+
+  .miss <- function(x) is.na(x) | trimws(as.character(x)) %in% c("", "Missing", "NA", "Unknown")
+  .ctx  <- intersect(c("SAMPLE_ALIQUOT","SAMPLE","Record_ID","Site","Group","Race","Ethnicity",
+                       "sex","age_at_subject","CDX","Case_Control","APOE.geno","APOE_WGS"),
+                     names(merged_combined))
+  .valid_apoe <- c("2/2","2/3","2/4","3/3","3/4","4/4")
+  .written <- character(0)
+  .xlsx_ok <- requireNamespace("writexl", quietly = TRUE)
+  wr <- function(df, f) {
+    base <- sub("\\.csv$", "", f)
+    # Reports are written as .xlsx so Excel keeps APOE genotypes ("3/4") as text (no date
+    # conversion). Fall back to .csv only if the writexl package is unavailable.
+    if (.xlsx_ok) {
+      writexl::write_xlsx(df, file.path(REPORTS_DIR, paste0(base, ".xlsx")))
+      .written <<- c(.written, sprintf("`%s.xlsx` — %d row(s)", base, nrow(df)))
+    } else {
+      readr::write_csv(df, file.path(REPORTS_DIR, f), na = "")
+      .written <<- c(.written, sprintf("`%s` (install writexl for .xlsx) — %d row(s)", f, nrow(df)))
+    }
+  }
+
+  # 1. Mapping keys (shareable) -----------------------------------------------
+  if (exists("dx_config")) {
+    .cdx_lut <- character(0)
+    for (k in dx_config$keep) .cdx_lut[k] <- k
+    for (tg in names(dx_config$collapse)) for (s in dx_config$collapse[[tg]]) .cdx_lut[s] <- tg
+    wr(merged_combined %>% count(CDX, name = "n_in_batch") %>%
+         mutate(CDX_collapsed = unname(.cdx_lut[CDX]),
+                status = if_else(is.na(CDX_collapsed), "EXCLUDED", "kept")) %>%
+         arrange(is.na(CDX_collapsed), desc(n_in_batch)),
+       "mapping_key_CDX.csv")
+  }
+  if (file.exists(file.path(.review_dir, "Ancestry_review.csv"))) {
+    wr(suppressMessages(read_csv(file.path(.review_dir, "Ancestry_review.csv"), show_col_types = FALSE)) %>%
+         select(any_of(c("Group","Race","Ethnicity","n_in_batch","FINAL_Ancestry","unexpected_race_eth"))),
+       "mapping_key_Ancestry.csv")
+  }
+
+  # 2. Implausible values ------------------------------------------------------
+  plausible <- list(age_at_subject=c(18,110), BMI=c(10,80), weight_lb=c(50,500), height_inches=c(36,90))
+  .impl <- list()
+  for (v in names(plausible)) if (v %in% names(merged_combined)) {
+    x <- suppressWarnings(as.numeric(merged_combined[[v]]))
+    hit <- which(!is.na(x) & (x < plausible[[v]][1] | x > plausible[[v]][2]))
+    if (length(hit)) .impl[[v]] <- merged_combined[hit, .ctx] %>%
+      mutate(variable = v, value = x[hit],
+             expected_range = paste0("[", plausible[[v]][1], ", ", plausible[[v]][2], "]"))
+  }
+  wr(if (length(.impl)) bind_rows(.impl) else merged_combined[0, .ctx], "error_implausible_values.csv")
+
+  # 3. Unexpected Race/Ethnicity ----------------------------------------------
+  g <- merged_combined$Group_Race_Ethnicity
+  unexp_idx <- which(
+    (grepl("BL",g)&grepl("WH",g)) | (grepl("HI",g)&grepl("NH",g)) | (grepl("AA",g)&grepl("WH",g)) |
+    (grepl("AFDC",g)&grepl("WH",g)) | (grepl("AFDC",g)&grepl("HI",g)) | (grepl("AA",g)&grepl("HI",g)))
+  wr(merged_combined[unexp_idx, c(.ctx, "Group_Race_Ethnicity")] %>% distinct(),
+     "error_unexpected_race_ethnicity.csv")
+
+  # 4. Missing data ------------------------------------------------------------
+  md <- merged_combined %>% transmute(SAMPLE_ALIQUOT, SAMPLE, Record_ID, Site,
+    miss_CDX=.miss(CDX), miss_Group=.miss(Group), miss_Race=.miss(Race), miss_Ethnicity=.miss(Ethnicity),
+    miss_sex=.miss(sex), miss_age=.miss(age_at_subject),
+    miss_APOE_Sanger=.miss(APOE.geno), miss_APOE_WGS=.miss(APOE_WGS),
+    miss_APOE_any=.miss(APOE.geno) & .miss(APOE_WGS))
+  # by-sample report flags CRITICAL missingness only (WGS-missing is the norm, kept as a column);
+  # the summary below still tallies every field incl. Sanger/WGS coverage.
+  .crit <- c("miss_CDX","miss_Race","miss_Ethnicity","miss_sex","miss_age","miss_APOE_any")
+  wr(md %>% filter(if_any(all_of(.crit), ~ .x)), "missing_data_by_sample.csv")
+  wr(md %>% summarise(across(starts_with("miss_"), sum)) %>%
+       pivot_longer(everything(), names_to="field", values_to="n_missing") %>%
+       mutate(field=sub("^miss_","",field), pct_missing=round(100*n_missing/nrow(md),1)) %>%
+       arrange(desc(n_missing)), "missing_data_summary.csv")
+
+  # 5. APOE integrity (Sanger vs WGS discordance + invalid format) -------------
+  .nrm <- function(x){ x<-trimws(as.character(x)); ifelse(!is.na(x)&nchar(x)==2, paste0(substr(x,1,1),"/",substr(x,2,2)), x) }
+  ap <- merged_combined %>% mutate(
+    wgs_norm = .nrm(APOE_WGS), sanger = as.character(APOE.geno),
+    discordant     = !.miss(sanger) & !.miss(wgs_norm) & sanger != wgs_norm,
+    invalid_sanger = !.miss(sanger) & !(sanger %in% .valid_apoe),
+    invalid_wgs    = !.miss(wgs_norm) & !(wgs_norm %in% .valid_apoe))
+  wr(ap %>% filter(discordant|invalid_sanger|invalid_wgs) %>%
+       select(all_of(.ctx), wgs_norm, discordant, invalid_sanger, invalid_wgs),
+     "error_APOE_integrity.csv")
+
+  # 6. Clinical consistency ----------------------------------------------------
+  caselike <- function(x) grepl("AD|Case|Dementia|Lewy|Cog Imp", x, ignore.case=TRUE)
+  ctrllike <- function(x) grepl("NCI|Control", x, ignore.case=TRUE)
+  cl <- merged_combined %>% mutate(
+    .age=suppressWarnings(as.numeric(age_at_subject)), .aoo=suppressWarnings(as.numeric(AOO)),
+    aoo_gt_age = !is.na(.aoo) & !is.na(.age) & .aoo > .age,
+    cdx_casecontrol_conflict = (caselike(CDX)&ctrllike(Case_Control)) | (ctrllike(CDX)&caselike(Case_Control)))
+  wr(cl %>% filter(aoo_gt_age | (cdx_casecontrol_conflict %in% TRUE)) %>%
+       select(all_of(.ctx), AOO, Years_Onset, aoo_gt_age, cdx_casecontrol_conflict),
+     "error_clinical_consistency.csv")
+  wr(merged_combined %>% count(CDX, Case_Control) %>% arrange(desc(n)), "check_CDX_vs_CaseControl_crosstab.csv")
+
+  # 7. Categorical integrity ---------------------------------------------------
+  wr(merged_combined %>% mutate(
+       bad_sex = !.miss(sex) & !(sex %in% c("M","F")),
+       bad_ethnicity = !.miss(Ethnicity) & !(Ethnicity %in% c("HI","NH")),
+       bad_race = !.miss(Race) & !grepl(" ", Race) & !(Race %in% c("BL","WH","MU","AI"))) %>%
+       filter(bad_sex|bad_ethnicity|bad_race) %>%
+       select(all_of(.ctx), bad_sex, bad_ethnicity, bad_race),
+     "error_categorical_unexpected_levels.csv")
+  wr(merged_combined %>% group_by(SAMPLE_ALIQUOT) %>% filter(n()>1) %>% ungroup() %>% select(all_of(.ctx)),
+     "error_duplicate_SAMPLE_ALIQUOT.csv")
+
+  # 8. NPQ-not-in-metadata is NOT duplicated here — it already exists in the output root as
+  #    samples_not_in_metadata.csv (Step 2); it is referenced in the "Files to Send" section.
+
+  cat("Reports written to `", REPORTS_DIR, "/`:\n\n", sep = "")
+  for (w in .written) cat("- ", w, "\n", sep = "")
+  cat("\n")
+} else {
+  cat("*Reports skipped (covariates off or no merged data).*\n\n")
+}
 ```
 
 # Output Files {#output}
@@ -959,4 +1314,55 @@ To manually edit exclusions and re-run filtering: 1. Open `output_files/sample_e
 ``` r
 quarto::quarto_render("Metadata_Merge_Pipeline.qmd",
                       execute_params = list(filter_only = TRUE))
+```
+
+---
+
+# Files to Send for Review & Verification {#send}
+
+```{r}
+#| label: files-to-send
+#| echo: false
+#| results: asis
+#| message: false
+#| warning: false
+
+if (exists("REPORTS_DIR") && dir.exists(REPORTS_DIR)) {
+  .ext  <- if (file.exists(file.path(REPORTS_DIR, "mapping_key_CDX.xlsx"))) "xlsx" else "csv"
+  .rows <- function(p) {
+    if (!file.exists(p)) return(NA_integer_)
+    if (grepl("\\.xlsx$", p)) nrow(suppressMessages(readxl::read_excel(p)))
+    else nrow(suppressMessages(readr::read_csv(p, show_col_types = FALSE)))
+  }
+  .rp <- function(base) file.path(REPORTS_DIR, paste0(base, ".", .ext))
+
+  cat("Outputs below go to the contributing groups for **review / verification**. ",
+      "Reports are written as `.", .ext, "`",
+      if (.ext == "xlsx") " — open in Excel; APOE genotypes stay text (no date conversion)."
+      else " (install the `writexl` package for Excel-safe `.xlsx`).",
+      " `sample_exclusion_report.csv` is **internal** (drives filtering) and is not sent.\n\n", sep = "")
+
+  cat("### 1. Mapping keys — confirm the groupings\n\n")
+  for (b in c("mapping_key_CDX", "mapping_key_Ancestry")) {
+    p <- .rp(b); if (file.exists(p)) cat(sprintf("- `reports/%s.%s` (%d rows)\n", b, .ext, .rows(p)))
+  }
+
+  cat("\n### 2. Data-issue reports — correct & verify (⚠ = has flags, ✓ = clean)\n\n")
+  for (b in c("error_implausible_values", "error_unexpected_race_ethnicity", "missing_data_by_sample",
+              "error_APOE_integrity", "error_clinical_consistency", "error_categorical_unexpected_levels",
+              "error_duplicate_SAMPLE_ALIQUOT")) {
+    n <- .rows(.rp(b))
+    if (!is.na(n)) cat(sprintf("- %s `reports/%s.%s` — %d flagged\n", if (n > 0) "⚠" else "✓", b, .ext, n))
+  }
+  nn <- .rows(file.path(OUTPUT_DIR, "samples_not_in_metadata.csv"))
+  if (!is.na(nn)) cat(sprintf("- %s `samples_not_in_metadata.csv` (output root) — %d NPQ samples lacking metadata\n",
+                              if (nn > 0) "⚠" else "✓", nn))
+
+  cat("\n### Supporting context (not action items)\n\n")
+  cat(sprintf("- `reports/missing_data_summary.%s` — per-field missingness incl. APOE Sanger / WGS / any\n", .ext))
+  cat(sprintf("- `reports/check_CDX_vs_CaseControl_crosstab.%s` — CDX × Case_Control cross-tab\n", .ext))
+  cat("\n*Internal, do not send:* `sample_exclusion_report.csv` (drives sample filtering).\n\n")
+} else {
+  cat("*No reports/ folder (covariates off).*\n\n")
+}
 ```
