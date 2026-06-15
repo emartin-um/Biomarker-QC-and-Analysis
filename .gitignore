@@ -39,5 +39,9 @@ Rplots.pdf
 # Old/archived files
 /old/
 
+# Archived / backed-up run outputs (kept on disk for provenance, not in version control)
+**/_archive*/
+**/_backup*/
+
 # Dataset-specific notes (not tracked - each dataset has its own)
 notes.md

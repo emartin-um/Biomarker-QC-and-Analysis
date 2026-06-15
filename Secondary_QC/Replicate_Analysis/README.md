@@ -2,6 +2,8 @@
 
 Analysis of replicate samples for assessing assay reproducibility and concordance across plates and runs.
 
+> **Cross-plate study-sample replicates (2026-06):** besides the HIHG control replicates (`Replicate_list.csv`), `Metadata_Merge` now emits **`filtered/filtered_combined_duplicates.csv`** — both runs of every real study sample assayed on two plates (same `SAMPLE`, with `dup_group` + `provisional_keep`). Use it for cross-plate concordance/CV on study samples; usable pairs appear only from a **combined** merge (both runs present), and the comparison informs which run to keep in `Metadata_Merge/reports/duplicates/Duplicate_review.xlsx`. See `../../Metadata_Merge/README.md`.
+
 ## Usage
 
 1. Open `Replicate_Analysis.Rproj` in RStudio

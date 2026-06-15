@@ -2,11 +2,18 @@
 title: "Primary QC of Biomarker Data for ALZ123 Combined Datasets"
 author: "ERM"
 date: "`r Sys.Date()`"
-output: 
+output:
   html_document:
     toc: true
     toc_float: true
     code_folding: hide
+knit: |
+  (function(input, ...) {
+    npqs <- list.files("input_files", pattern = "^NPQ.*\\.csv$", full.names = TRUE)
+    npqs <- npqs[!grepl("Low|Raw|Sample_QC|triage", basename(npqs), ignore.case = TRUE)]
+    tag  <- if (length(npqs)) tools::file_path_sans_ext(basename(npqs[which.max(file.mtime(npqs))])) else format(Sys.Date(), "%Y%m%d")
+    rmarkdown::render(input, output_file = paste0("QC_Pipeline_Primary_Alamar_", tag, ".html"))
+  })
 ---
 # A. Overview
 
@@ -24,7 +31,7 @@ This protocol describes a workflow for primary **quality control (QC)** of bioma
 
 QC analyses are **agnostic** to phenotypic and covariate information.
 
-**For a new QC run, change title in YAML, NPQ input file name and this RMarkdown file name (where .html output will go)**
+**For a new QC run**, set the NPQ input filename in section A.3 (and optionally the title in YAML). You **no longer need to rename this file** — the `knit:` function in the YAML header auto-names the HTML after the NPQ input dataset (e.g. `QC_Pipeline_Primary_Alamar_NPQ_20251220.html`), so each run's report is unique and won't overwrite a previous one.
 
 
 ## A.1 Input Data
@@ -120,9 +127,33 @@ combined_t <- t(combined_numeric)
 # Convert to data.frame
 combined_df <- as.data.frame(combined_t)
 
-# --- Read metadata ---
-#I CHANGED THIS TO JUST READ IN SAMPLE_QC, WHICH CONTAINS THE SAMPLE INFO. WE DON'T NEED THIS FILE.
-alamar_qc <- read_csv("input_files/Sample_QC.csv", skip=12, show_col_types = FALSE)
+# --- Read Alamar Sample QC (per-sample QC stats + sample info) ---
+# Robust to export drift: the Alamar export prepends a variable-length "metric" preamble before the
+# real header row. Instead of a hardcoded skip, auto-detect the header row (the one containing
+# "Sample Name") and validate that the expected columns are present, so a format change fails loudly
+# with a clear message rather than cryptically downstream.
+.sqc_path <- "input_files/Sample_QC.csv"
+.sqc_peek <- readLines(.sqc_path, n = 40, warn = FALSE)
+.sqc_skip <- which(grepl('(^|,)\\s*"?Sample Name"?\\s*(,|$)', .sqc_peek))[1] - 1L
+if (is.na(.sqc_skip)) {
+  .sqc_skip <- 12L
+  warning("Sample_QC.csv: 'Sample Name' header not found in first 40 lines; falling back to skip=12.")
+}
+alamar_qc <- read_csv(.sqc_path, skip = .sqc_skip, show_col_types = FALSE)
+message("Sample_QC.csv: header auto-detected at line ", .sqc_skip + 1L, " (skip=", .sqc_skip, ").")
+
+.sqc_miss <- setdiff(c("plateID", "Sample Name", "QC Status"), names(alamar_qc))
+if (length(.sqc_miss))
+  stop("Sample_QC.csv is missing expected column(s): ", paste(.sqc_miss, collapse = ", "),
+       ".\n  Columns found: ", paste(names(alamar_qc), collapse = ", "),
+       "\n  The export format may have changed — check the header row / column names.")
+
+# Export drift in value formatting: `IC Median`/`Detectability` may be percent STRINGS
+# ("-4.6%", "95.4%") or numeric; `IC Reads`/`Reads` may carry thousands separators. Coerce to numeric
+# (parse_number strips "%" and commas; genuinely numeric input passes through unchanged).
+.to_num <- function(x) if (is.numeric(x)) x else readr::parse_number(as.character(x))
+alamar_qc <- alamar_qc %>%
+  mutate(across(any_of(c("IC Median", "Detectability", "IC Reads", "Reads")), .to_num))
 
 # Extract Run and Bay from plateID
 meta_df <- alamar_qc %>%
@@ -286,6 +317,17 @@ detect <- read_csv("input_files/biomarker_detectability.csv", show_col_types = F
 
 # Keep only the numeric plate columns and overall
 plate_cols <- names(detect)[-1]  # first column is Biomarker name
+
+# Robustness to export drift: coerce plate columns to numeric (a future export might quote them or
+# add "%"), then ensure the 0-100 scale the thresholds assume (min_detectability_qc, min_detectability).
+detect <- detect %>%
+  mutate(across(all_of(plate_cols), ~ if (is.numeric(.x)) .x else readr::parse_number(as.character(.x))))
+.det_max <- suppressWarnings(max(unlist(detect[plate_cols]), na.rm = TRUE))
+if (is.finite(.det_max) && .det_max <= 1) {
+  detect <- detect %>% mutate(across(all_of(plate_cols), ~ .x * 100))
+  message("biomarker_detectability.csv appeared to be on a 0-1 proportion scale (max = ",
+          round(.det_max, 3), "); rescaled x100 to match the 0-100 detectability thresholds.")
+}
 
 # Relative-quant metrics (Curve_Quant = "R", e.g. APOE, CRP): Alamar reports no detectability
 # or LOD, so every plate value is NA. Keep them in all datasets and exempt from detectability
