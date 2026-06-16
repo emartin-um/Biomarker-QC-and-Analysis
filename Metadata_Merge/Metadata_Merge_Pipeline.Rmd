@@ -29,6 +29,19 @@ knit: |
 
 <!--
 CHANGELOG — Metadata_Merge_Pipeline.Rmd
+  2026-06-16 (a): APOE handling + error-report restructure.
+   * Step 6d: REMOVED the swap-affected Sanger masking. APOE.geno_final now DEFAULTS TO WGS where
+     available (Sanger only when WGS missing); on disagreement WGS wins. No sample-specific plate-swap
+     correction lives in this general pipeline — the AD-Hispanic swap re-map belongs with the affected
+     batch (QC_Runs/<run>/WGS_Midi_Remap/). Disagreements are surfaced so the swap stays recognizable.
+   * APOE error reporting split: `error_APOE_integrity` = Sanger-vs-WGS *concordance* check (fires only
+     when BOTH genotypes exist and disagree); `error_APOE_no_genotype` = no APOE call from either source.
+     The by-sample summary counts only APOE_no_genotype (not discordance); APOE dropped from the
+     missing-critical set to avoid double-counting.
+   * Combined workbook: missing-data expanded into one drill-down sheet per critical field (Missing or 0
+     CDX / Race / Ethnicity / Sex / Age) after missing_data_summary; redundant missing_data_by_sample and
+     QC_error_summary sheets omitted from the workbook (standalone files still written). SUMMARY gained a
+     blank `notes` column; error_unexpected_race_ethnicity gained a blank `Suggested_Coding` column.
   2026-06-15 (f): reports/ organized into sub-folders — `errors/` (error_* checks), `missing_data/`
    (missing_data_by_sample + summary), `duplicates/` (Duplicate_review + Longitudinal_review). The
    overviews (QC_error_report_combined / _by_sample / _summary), mapping keys, and the CDX×Case_Control
@@ -1138,12 +1151,13 @@ if (INCLUDE_DERIVED_COVARS) {
   cat(sprintf("**Rows before grouping:** %d | **After:** %d | **Removed:** %d\n\n",
               n_before, n_after, n_before - n_after))
 
-  # ---- Join WGS APOE genotypes (NO plate-swap correction applied) ----
-  # WGS is read from the same auto-detected metadata; used where available, Sanger APOE.geno as
-  # fallback. The 2026-06 AD-Hispanic WGS plate-swap is NOT corrected here (the 2026-06-08
-  # ..._plateswapcorrected_2026Jun.csv was wrong and is archived); instead the swap-affected
-  # samples are masked below so APOE.geno_final falls back to Sanger for them, pending USUHS
-  # confirmation. See ../../../May_2026_WGS_QC/WGS_Plate_Swap_Summary_2026Jun11.md.
+  # ---- Join WGS APOE genotypes ----
+  # WGS is read from the auto-detected metadata. APOE.geno_final DEFAULTS TO WGS where available
+  # (Sanger APOE.geno is used only when WGS is missing) — so on a Sanger-vs-WGS disagreement, WGS
+  # wins. This general pipeline applies NO sample-specific plate-swap correction; the AD-Hispanic
+  # WGS plate-swap disagreements are surfaced in the `error_APOE_integrity` report (step 5) so the
+  # swap stays recognizable, and the sample-specific re-map lives with the affected batch
+  # (e.g. QC_Runs/<run>/WGS_Midi_Remap/), not here.
   wgs_src <- read_csv(metadata_file, show_col_types = FALSE)
   if ("APOE_WGS" %in% names(wgs_src)) {
     wgs_lookup <- wgs_src %>%
@@ -1166,16 +1180,10 @@ if (INCLUDE_DERIVED_COVARS) {
     select(-any_of("APOE_WGS")) %>%
     left_join(wgs_lookup, by = "SAMPLE_ALIQUOT")
 
-  # Mask swap-affected AD-Hispanic samples -> APOE.geno_final falls back to Sanger for them.
-  .swap_idmap <- "../../../May_2026_WGS_QC/WGS_chr1_corrected_idmap_2026Jun11.csv"
-  if (file.exists(.swap_idmap)) {
-    .affected <- read_csv(.swap_idmap, show_col_types = FALSE)$SAMPLE_aslabeled
-    filtered_combined <- filtered_combined %>%
-      mutate(APOE_WGS_norm = if_else(as.character(SAMPLE) %in% as.character(.affected),
-                                     NA_character_, APOE_WGS_norm))
-  }
+  # (No plate-swap masking here — WGS is the default; see header note. Disagreements are reported
+  #  by error_APOE_integrity; the sample-specific re-map is run in the affected batch's folder.)
 
-  # APOE4 carrier variables — derived from WGS-corrected genotype where available
+  # APOE4 carrier variables — derived from WGS-preferred genotype where available
   filtered_combined <- filtered_combined %>%
     mutate(
       # Flag samples where WGS genotype differs from original (both non-NA)
@@ -1551,7 +1559,8 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
   unexp_idx <- which(
     (grepl("BL",g)&grepl("WH",g)) | (grepl("HI",g)&grepl("NH",g)) | (grepl("AA",g)&grepl("WH",g)) |
     (grepl("AFDC",g)&grepl("WH",g)) | (grepl("AFDC",g)&grepl("HI",g)) | (grepl("AA",g)&grepl("HI",g)))
-  wr(merged_combined[unexp_idx, c(.ctx, "Group_Race_Ethnicity")] %>% distinct(),
+  wr(merged_combined[unexp_idx, c(.ctx, "Group_Race_Ethnicity")] %>% distinct() %>%
+       mutate(Suggested_Coding = ""),   # blank — reviewer's suggested Group_Race_Ethnicity recoding
      "error_unexpected_race_ethnicity.csv", subdir = "errors")
 
   # 4. Missing data ------------------------------------------------------------
@@ -1560,25 +1569,38 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
     miss_sex=.miss(sex), miss_age=.miss(age_at_subject),
     miss_APOE_Sanger=.miss(APOE.geno), miss_APOE_WGS=.miss(APOE_WGS),
     miss_APOE_any=.miss(APOE.geno) & .miss(APOE_WGS))
-  # by-sample report flags CRITICAL missingness only (WGS-missing is the norm, kept as a column);
-  # the summary below still tallies every field incl. Sanger/WGS coverage.
-  .crit <- c("miss_CDX","miss_Race","miss_Ethnicity","miss_sex","miss_age","miss_APOE_any")
+  # by-sample report flags CRITICAL missingness only (WGS-missing is the norm, kept as a column).
+  # APOE "no call from either source" is intentionally NOT critical here, to avoid double-counting —
+  # it is reported separately as the by-sample APOE_no_genotype flag (step 8). The summary below
+  # still tallies every field incl. APOE Sanger/WGS coverage and APOE_any.
+  .crit <- c("miss_CDX","miss_Race","miss_Ethnicity","miss_sex","miss_age")
   wr(md %>% filter(if_any(all_of(.crit), ~ .x)), "missing_data_by_sample.csv", subdir = "missing_data")
   wr(md %>% summarise(across(starts_with("miss_"), sum)) %>%
        pivot_longer(everything(), names_to="field", values_to="n_missing") %>%
        mutate(field=sub("^miss_","",field), pct_missing=round(100*n_missing/nrow(md),1)) %>%
        arrange(desc(n_missing)), "missing_data_summary.csv", subdir = "missing_data")
 
-  # 5. APOE integrity (Sanger vs WGS discordance + invalid format) -------------
+  # 5. APOE integrity (concordance) — requires TWO genotypes: flag a sample only
+  #    when it has BOTH a valid Sanger AND a valid WGS call that DISAGREE. Samples
+  #    with one call (or none) cannot be integrity-checked and are not flagged
+  #    here. (Discordance is the contested WGS plate-swap signal, also tracked in
+  #    Secondary_QC/APOE.) `no_apoe_geno` (no usable call from either source) is
+  #    derived here too; it feeds the by-sample summary's APOE error (step 8).
   .nrm <- function(x){ x<-trimws(as.character(x)); ifelse(!is.na(x)&nchar(x)==2, paste0(substr(x,1,1),"/",substr(x,2,2)), x) }
   ap <- merged_combined %>% mutate(
-    wgs_norm = .nrm(APOE_WGS), sanger = as.character(APOE.geno),
-    discordant     = !.miss(sanger) & !.miss(wgs_norm) & sanger != wgs_norm,
-    invalid_sanger = !.miss(sanger) & !(sanger %in% .valid_apoe),
-    invalid_wgs    = !.miss(wgs_norm) & !(wgs_norm %in% .valid_apoe))
-  wr(ap %>% filter(discordant|invalid_sanger|invalid_wgs) %>%
-       select(all_of(.ctx), wgs_norm, discordant, invalid_sanger, invalid_wgs),
+    wgs_norm     = .nrm(APOE_WGS), sanger = as.character(APOE.geno),
+    sanger_ok    = !.miss(sanger)   & sanger   %in% .valid_apoe,
+    wgs_ok       = !.miss(wgs_norm) & wgs_norm %in% .valid_apoe,
+    discordant   = sanger_ok & wgs_ok & sanger != wgs_norm,   # both present & valid, disagree
+    no_apoe_geno = !sanger_ok & !wgs_ok)                      # no usable call from either source
+  wr(ap %>% filter(discordant) %>%
+       select(all_of(.ctx), wgs_norm, discordant),
      "error_APOE_integrity.csv", subdir = "errors")
+  # No APOE call from either source (full per-sample detail) — feeds the by-sample
+  # APOE error (step 8) and gets its own sheet in the combined workbook.
+  wr(ap %>% filter(no_apoe_geno) %>%
+       select(all_of(.ctx), wgs_norm, sanger_ok, wgs_ok, no_apoe_geno),
+     "error_APOE_no_genotype.csv", subdir = "errors")
 
   # 6. Clinical consistency ----------------------------------------------------
   caselike <- function(x) grepl("AD|Case|Dementia|Lewy|Cog Imp", x, ignore.case=TRUE)
@@ -1606,11 +1628,14 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
   # 8. Consolidated QC error report — BY SAMPLE + SUMMARY -----------------------
   # One row per flagged sample (which checks tripped, n_issues, issues list) and a per-check summary.
   # Derived from the per-issue reports collected above (each carries SAMPLE_ALIQUOT).
+  # APOE error counted here = "no APOE call from either source" (error_APOE_no_genotype,
+  # the 36). The integrity/discordance report (error_APOE_integrity) is NOT counted in
+  # the by-sample summary — it needs two genotypes and is tracked separately.
   .err_checks <- c(
     implausible_value         = "error_implausible_values",
     unexpected_race_ethnicity = "error_unexpected_race_ethnicity",
     missing_critical_field    = "missing_data_by_sample",
-    APOE_integrity            = "error_APOE_integrity",
+    APOE_no_genotype          = "error_APOE_no_genotype",
     clinical_inconsistency    = "error_clinical_consistency",
     categorical_bad_level     = "error_categorical_unexpected_levels",
     duplicate_SAMPLE_ALIQUOT  = "error_duplicate_SAMPLE_ALIQUOT")
@@ -1641,23 +1666,51 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
   #    samples_not_in_metadata.csv (Step 2); it is referenced in the "Files to Send" section.
 
   # ── Combined single-file error report (sendable as ONE file) ───────────────────
-  # Bundles every error/issue report into one workbook: sheet 1 = SUMMARY (row count + status per
-  # check), then one sheet per check. Mapping keys + the CDX×Case_Control crosstab are excluded
-  # (reference keys, not error reports). The per-issue files above are still written too.
+  # One workbook: SUMMARY (per-check row count + status) → per-check sheets, with the
+  # missing-data block expanded into one drill-down sheet PER critical field (built
+  # from merged_combined, only fields that actually have samples). The lumped
+  # missing_data_by_sample and the QC_error_summary sheets are intentionally omitted
+  # here — redundant (missing detail = the per-field sheets; per-check overview =
+  # SUMMARY). Their standalone files are still written above.
   if (length(.all_reports) > 0) {
-    .summary <- tibble(check  = names(.all_reports),
-                       n_rows = vapply(.all_reports, nrow, integer(1))) %>%
-      mutate(status = if_else(n_rows > 0, "review", "clean")) %>%
+    .miss_specs <- list(
+      c(sheet = "Missing or 0 CDX",  field = "CDX"),
+      c(sheet = "Missing Race",      field = "Race"),
+      c(sheet = "Missing Ethnicity", field = "Ethnicity"),
+      c(sheet = "Missing Sex",       field = "sex"),
+      c(sheet = "Missing Age",       field = "age_at_subject"))
+    .field_sheets <- list()
+    for (s in .miss_specs) {
+      fld <- s[["field"]]; sht <- s[["sheet"]]; v <- merged_combined[[fld]]
+      idx <- if (fld == "CDX") which(.miss(v) | trimws(as.character(v)) == "0") else which(.miss(v))
+      if (length(idx)) .field_sheets[[sht]] <- merged_combined[idx, .ctx, drop = FALSE]
+    }
+    .pick <- function(nm) if (!is.null(.all_reports[[nm]])) setNames(list(.all_reports[[nm]]), nm) else list()
+    .body <- c(
+      .pick("error_implausible_values"),
+      .pick("error_unexpected_race_ethnicity"),
+      .pick("missing_data_summary"),
+      .field_sheets,
+      .pick("error_APOE_no_genotype"),
+      .pick("error_APOE_integrity"),
+      .pick("error_clinical_consistency"),
+      .pick("error_categorical_unexpected_levels"),
+      .pick("error_duplicate_SAMPLE_ALIQUOT"),
+      .pick("QC_error_report_by_sample"))
+    # SUMMARY = per-check overview; the per-field drill-down sheets are detail, not listed
+    .chk <- setdiff(names(.body), names(.field_sheets))
+    .summary <- tibble(check = .chk, n_rows = vapply(.body[.chk], nrow, integer(1))) %>%
+      mutate(status = if_else(n_rows > 0, "review", "clean"), notes = "") %>%  # notes = blank, for reviewer assignments
       arrange(desc(n_rows), check)
     if (.xlsx_ok) {
-      .combined <- c(list(SUMMARY = .summary), .all_reports)
+      .combined <- c(list(SUMMARY = .summary), .body)
       names(.combined) <- substr(make.unique(substr(names(.combined), 1, 31), sep = "_"), 1, 31)  # Excel 31-char sheet limit
       writexl::write_xlsx(.combined, file.path(REPORTS_DIR, "QC_error_report_combined.xlsx"))
-      .written <- c(.written, sprintf("`QC_error_report_combined.xlsx` — **one file**, %d sheet(s): SUMMARY + each check",
+      .written <- c(.written, sprintf("`QC_error_report_combined.xlsx` — **one file**, %d sheet(s): SUMMARY + per-check + per-missing-field detail",
                                       length(.combined)))
     } else {
-      .long <- bind_rows(lapply(names(.all_reports), function(n) {
-        d <- .all_reports[[n]]; if (!nrow(d)) return(NULL)
+      .long <- bind_rows(lapply(names(.body), function(n) {
+        d <- .body[[n]]; if (!nrow(d)) return(NULL)
         d %>% mutate(across(everything(), as.character), check = n)
       }))
       readr::write_csv(.summary, file.path(REPORTS_DIR, "QC_error_report_combined_summary.csv"), na = "")
@@ -1783,7 +1836,7 @@ if (exists("REPORTS_DIR") && dir.exists(REPORTS_DIR)) {
 
   cat("\n**Error reports** — `reports/errors/`:\n")
   for (b in c("error_implausible_values", "error_unexpected_race_ethnicity",
-              "error_APOE_integrity", "error_clinical_consistency",
+              "error_APOE_integrity", "error_APOE_no_genotype", "error_clinical_consistency",
               "error_categorical_unexpected_levels", "error_duplicate_SAMPLE_ALIQUOT")) {
     n <- .rows(.rp(b, "errors"))
     if (!is.na(n)) cat(sprintf("- %s `reports/errors/%s.%s` — %d flagged\n", if (n > 0) "⚠" else "✓", b, .ext, n))
