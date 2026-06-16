@@ -1,0 +1,687 @@
+---
+title: "Batch Effects Analysis for Alamar Biomarker Data"
+author: "ERM"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+# A. Overview
+
+This module assesses technical batch effects (Run and Bay) in the merged biomarker dataset.
+The hierarchy is: **Run → Bay (1/2/3, sequential within Run) → Sample**.
+
+Goals:
+1. Characterize plate composition (race, sex, age, site, diagnosis) by Run and Bay
+2. Identify confounding between biological covariates and batch variables
+3. Partition variance into Run, Bay, and biological sources per protein
+4. Quantify cross-plate reproducibility from HIHG replicates
+5. Make a data-driven decision about batch correction approach
+
+Biomarkers are in log2 NPQ scale throughout (no back-transformation needed for variance
+partitioning or linear models).
+
+**For a new dataset: update the input filename in Section A.3.**
+
+---
+
+## A.1 Input Data
+
+Default input: `merged_combined_post_QC.csv` from `Metadata_Merge/output_files_*/`.
+This file has separate `Run` and `Bay` columns and includes both standard and low-abundance biomarkers.
+
+Fallback: `merged_standard_post_QC.csv` from the same directory (standard biomarkers only, no separate Run/Bay — parsed from `RUN` column).
+
+Place in `input_files/` or let the pipeline auto-copy.
+
+## A.2 Parameters
+
+```{r params}
+# --- Adjustable parameters ---
+VP_CORES       <- 4      # cores for variancePartition (increase if available)
+VP_MIN_SAMPLES <- 10     # min samples per Run to include in VP
+ICC_MIN_REPS   <- 2      # min replicate pairs required for ICC calculation
+FDR_THRESHOLD  <- 0.05   # FDR cutoff for declaring significant batch effect
+```
+
+## A.3 Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lme4)
+library(variancePartition)
+library(BiocParallel)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(patchwork)
+
+# ---- Directories ----
+if (!dir.exists("input_files"))  dir.create("input_files")
+if (!dir.exists("output_files")) dir.create("output_files")
+
+# ---- Auto-copy from Metadata_Merge if needed ----
+# Default: merged_combined_post_QC.csv (has separate Run + Bay, all biomarkers)
+# Fallback: merged_standard_post_QC.csv (combined RUN column, standard biomarkers only)
+input_candidates <- list.files("input_files",
+                               pattern = "(merged_combined|merged_standard)_post_QC\\.csv$",
+                               full.names = TRUE)
+
+if (length(input_candidates) == 0) {
+  search_dirs <- list.files(
+    "../../Metadata_Merge",
+    pattern = "^output_files",
+    full.names = TRUE,
+    include.dirs = TRUE
+  )
+  search_dirs <- search_dirs[order(file.mtime(search_dirs), decreasing = TRUE)]
+
+  for (d in search_dirs) {
+    src <- file.path(d, "merged_combined_post_QC.csv")
+    if (file.exists(src)) {
+      file.copy(src, "input_files/")
+      message("Copied merged_combined from: ", src)
+      break
+    }
+    src <- file.path(d, "merged_standard_post_QC.csv")
+    if (file.exists(src)) {
+      file.copy(src, "input_files/")
+      message("Copied merged_standard from: ", src)
+      break
+    }
+  }
+  input_candidates <- list.files("input_files",
+                                 pattern = "(merged_combined|merged_standard)_post_QC\\.csv$",
+                                 full.names = TRUE)
+}
+
+if (length(input_candidates) == 0) {
+  stop("No input file found. Place merged_combined_post_QC.csv in input_files/ or ensure Metadata_Merge outputs exist.")
+}
+
+# Prefer merged_combined if both present
+if (any(grepl("merged_combined", input_candidates))) {
+  input_file <- input_candidates[grepl("merged_combined", input_candidates)][1]
+} else {
+  input_file <- input_candidates[1]
+}
+message("Using: ", basename(input_file))
+```
+
+---
+
+# B. Data Loading and Formatting
+
+```{r load-data, message=FALSE, warning=FALSE}
+raw <- read_csv(input_file, show_col_types = FALSE)
+
+# ---- Get Run_ID and Bay ----
+# merged_combined has separate Run + Bay columns -> rename Run -> Run_ID.
+# merged_standard only has the combined RUN column -> parse it.
+# Also handles any future file that already uses Run_ID directly.
+if ("Run_ID" %in% names(raw) && "Bay" %in% names(raw)) {
+  df <- raw
+  message("Using existing Run_ID and Bay columns.")
+} else if ("Run" %in% names(raw) && "Bay" %in% names(raw)) {
+  df <- raw %>% rename(Run_ID = Run)
+  message("Using existing Run and Bay columns (renamed Run -> Run_ID).")
+} else {
+  # Parse from combined RUN column (format: "20250711-1613_Bay1")
+  df <- raw %>%
+    mutate(
+      Run_ID = str_extract(RUN, "^[^_]+"),     # e.g. "20250711-1613"
+      Bay    = str_extract(RUN, "Bay[0-9]+")   # e.g. "Bay1"
+    )
+  message("Parsed Run_ID and Bay from RUN column.")
+}
+
+# ---- Identify biomarker columns ----
+# All numeric columns after the metadata block
+meta_cols <- c("RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID", "newsample",
+               "Group", "Ethnicity", "Race", "sex", "age_at_subject",
+               "CDX", "Case_Control", "AOO", "Years_Onset", "APOE.geno",
+               "height_inches", "weight_lb", "BMI", "Site",
+               "Country/State", "country_of_birth", "metadata_source",
+               "newsamp", "Group_Race_Ethnicity", "Run_ID", "Bay", "Run",
+               "___1", "APOE")
+
+biomarker_cols <- names(df)[!(names(df) %in% meta_cols) & sapply(df, is.numeric)]
+
+# Exclude mCherry if present (internal control, not a biomarker)
+biomarker_cols <- biomarker_cols[biomarker_cols != "mCherry"]
+
+# ---- Study samples only (exclude controls/reps by filtering on SAMPLE_ALIQUOT) ----
+# Controls have prefixes NC, SC, IPC; HIHG reps are identified separately below
+df_samples <- df %>%
+  filter(!str_detect(SAMPLE_ALIQUOT, "^(NC|SC|IPC)"))
+
+# ---- Identify HIHG replicates (SAMPLE appears >1 time) ----
+rep_counts <- df_samples %>%
+  count(SAMPLE, name = "n_runs") %>%
+  filter(n_runs > 1)
+
+df_reps    <- df_samples %>% filter(SAMPLE %in% rep_counts$SAMPLE)
+df_unique  <- df_samples %>% filter(!SAMPLE %in% rep_counts$SAMPLE)
+
+cat("Total samples (excl controls):", nrow(df_samples), "\n")
+cat("Unique biological samples:    ", nrow(df_unique), "\n")
+cat("Replicated biological samples:", n_distinct(df_reps$SAMPLE), "\n")
+cat("Replicate observations:       ", nrow(df_reps), "\n")
+cat("Runs:                         ", n_distinct(df_samples$Run_ID), "\n")
+cat("Bays observed:                ", paste(sort(unique(df_samples$Bay)), collapse=", "), "\n")
+cat("Biomarkers:                   ", length(biomarker_cols), "\n")
+```
+
+---
+
+# C. Plate Composition
+
+This section examines whether demographic and clinical variables are balanced across
+Runs and Bays. Confounding between batch and biology is the primary concern.
+
+## C.1 Sample Counts per Run x Bay
+
+```{r composition-counts, message=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+count_tbl <- df_samples %>%
+  count(Run_ID, Bay) %>%
+  pivot_wider(names_from = Bay, values_from = n, values_fill = 0) %>%
+  arrange(Run_ID)
+
+kable(count_tbl, caption = "Sample counts per Run x Bay (study samples only)") %>%
+  kable_styling(full_width = FALSE)
+```
+
+## C.2 Race Distribution per Run
+
+```{r composition-race, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+race_tbl <- df_samples %>%
+  count(Run_ID, Race) %>%
+  group_by(Run_ID) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+ggplot(race_tbl, aes(x = Run_ID, y = pct, fill = Race)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
+  labs(title = "Race composition per Run",
+       x = "Run", y = "% of samples", fill = "Race")
+```
+
+## C.3 Race Distribution per Bay (across all Runs)
+
+```{r composition-race-bay, message=FALSE, warning=FALSE, fig.width=7, fig.height=4}
+bay_race <- df_samples %>%
+  count(Bay, Race) %>%
+  group_by(Bay) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+ggplot(bay_race, aes(x = Bay, y = pct, fill = Race)) +
+  geom_col() +
+  theme_bw() +
+  labs(title = "Race composition per Bay (pooled across Runs)",
+       x = "Bay", y = "% of samples", fill = "Race")
+```
+
+## C.4 Sex and Age Distribution per Run
+
+```{r composition-sex-age, message=FALSE, warning=FALSE, fig.width=12, fig.height=8}
+p_sex <- df_samples %>%
+  count(Run_ID, sex) %>%
+  group_by(Run_ID) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ggplot(aes(x = Run_ID, y = pct, fill = sex)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
+  labs(title = "Sex composition per Run", x = NULL, y = "% samples", fill = "Sex")
+
+p_age <- df_samples %>%
+  ggplot(aes(x = Run_ID, y = age_at_subject)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.6, outlier.size = 1) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
+  labs(title = "Age distribution per Run", x = "Run", y = "Age")
+
+p_sex / p_age
+```
+
+## C.5 Site Distribution per Run
+
+```{r composition-site, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+site_tbl <- df_samples %>%
+  count(Run_ID, Site) %>%
+  group_by(Run_ID) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+ggplot(site_tbl, aes(x = Run_ID, y = pct, fill = Site)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        legend.text = element_text(size = 7)) +
+  labs(title = "Site composition per Run",
+       x = "Run", y = "% of samples", fill = "Site")
+```
+
+## C.6 Diagnosis Distribution per Run
+
+```{r composition-dx, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+dx_tbl <- df_samples %>%
+  mutate(Dx = coalesce(CDX, Case_Control)) %>%
+  count(Run_ID, Dx) %>%
+  group_by(Run_ID) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+ggplot(dx_tbl, aes(x = Run_ID, y = pct, fill = Dx)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
+  labs(title = "Diagnosis composition per Run",
+       x = "Run", y = "% of samples", fill = "Diagnosis")
+```
+
+## C.7 Confounding: Correlation of Batch with Covariates
+
+Cramer's V for categorical variables, sqrt(eta-squared) for age. Values > 0.3 indicate
+meaningful confounding between batch variable and covariate.
+
+```{r confounding, message=FALSE, warning=FALSE}
+cramers_v <- function(x, y) {
+  tbl <- table(x, y)
+  chi <- suppressWarnings(chisq.test(tbl))
+  n   <- sum(tbl)
+  k   <- min(nrow(tbl), ncol(tbl))
+  v   <- sqrt(chi$statistic / (n * (k - 1)))
+  as.numeric(v)
+}
+
+eta_sq <- function(group, value) {
+  fit <- aov(value ~ group)
+  ss  <- summary(fit)[[1]][["Sum Sq"]]
+  ss[1] / sum(ss)
+}
+
+cov_list <- list(
+  Race  = df_samples$Race,
+  sex   = df_samples$sex,
+  Site  = df_samples$Site,
+  Dx    = coalesce(df_samples$CDX, df_samples$Case_Control)
+)
+
+batch_vars <- list(
+  Run_ID = df_samples$Run_ID,
+  Bay    = df_samples$Bay
+)
+
+conf_results <- map_dfr(names(batch_vars), function(bv) {
+  bvec <- batch_vars[[bv]]
+  rows <- map_dfr(names(cov_list), function(cv) {
+    cvec <- cov_list[[cv]]
+    ok   <- !is.na(bvec) & !is.na(cvec)
+    tibble(Batch_Var = bv, Covariate = cv,
+           CramersV  = cramers_v(bvec[ok], cvec[ok]))
+  })
+  age_ok <- !is.na(bvec) & !is.na(df_samples$age_at_subject)
+  bind_rows(rows, tibble(
+    Batch_Var = bv, Covariate = "age",
+    CramersV  = sqrt(eta_sq(bvec[age_ok], df_samples$age_at_subject[age_ok]))
+  ))
+}) %>%
+  mutate(Concern = case_when(
+    CramersV > 0.5 ~ "HIGH",
+    CramersV > 0.3 ~ "moderate",
+    TRUE           ~ "low"
+  ))
+
+kable(conf_results %>% arrange(desc(CramersV)), digits = 3,
+      caption = "Confounding between batch variables and biological covariates") %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(which(conf_results %>% arrange(desc(CramersV)) %>% pull(Concern) == "HIGH"),
+           background = "#ffd6d6") %>%
+  row_spec(which(conf_results %>% arrange(desc(CramersV)) %>% pull(Concern) == "moderate"),
+           background = "#fff3cd")
+
+write_csv(conf_results, "output_files/batch_covariate_confounding.csv")
+```
+
+---
+
+# D. Variance Partitioning
+
+Decomposes variance per protein into:
+- Fixed effects: Race, sex, age, Site, Diagnosis
+- Random effects: Run (between-run technical variation), Bay nested in Run (sequential/drift)
+- Residual: unexplained
+
+Model: `~ Race + sex + age_at_subject + Site + Dx + (1|Run_ID) + (1|Run_ID:Bay)`
+
+Proteins with high Run or Bay variance fractions are candidates for batch correction.
+Proteins where Run variance ~ Race variance indicate confounding that correction cannot resolve.
+
+```{r vp-prep, message=FALSE, warning=FALSE}
+# Use unique samples only (no replicates) to avoid inflating residual
+vp_df <- df_unique %>%
+  filter(!is.na(Race), !is.na(sex), !is.na(age_at_subject),
+         !is.na(Run_ID), !is.na(Bay)) %>%
+  mutate(Dx = coalesce(CDX, Case_Control))
+
+# Remove Runs with fewer than VP_MIN_SAMPLES
+run_counts <- count(vp_df, Run_ID)
+vp_df <- vp_df %>%
+  filter(Run_ID %in% run_counts$Run_ID[run_counts$n >= VP_MIN_SAMPLES])
+
+cat("Samples used for VP:", nrow(vp_df), "\n")
+cat("Runs included:      ", n_distinct(vp_df$Run_ID), "\n")
+
+# Biomarker matrix: proteins x samples (variancePartition convention)
+expr_mat <- vp_df %>%
+  select(all_of(biomarker_cols)) %>%
+  as.matrix() %>%
+  t()
+
+info_df <- vp_df %>%
+  select(Run_ID, Bay, Race, sex, age_at_subject, Site, Dx) %>%
+  mutate(across(c(Race, sex, Site, Dx, Run_ID, Bay), as.factor)) %>%
+  as.data.frame()
+```
+
+```{r vp-run, message=FALSE, warning=FALSE, fig.width=12, fig.height=6}
+register(MulticoreParam(VP_CORES))
+
+form <- ~ Race + sex + age_at_subject + Site + Dx + (1|Run_ID) + (1|Run_ID:Bay)
+
+vp_fit <- fitExtractVarPartModel(expr_mat, form, info_df)
+
+plotVarPart(vp_fit, main = "Variance partitioning: biological vs. batch effects")
+```
+
+```{r vp-summary, message=FALSE, warning=FALSE}
+vp_df_out <- as.data.frame(vp_fit) %>%
+  rownames_to_column("Biomarker") %>%
+  arrange(desc(`Run_ID`))
+
+# Threshold summary
+thresh_tbl <- map_dfr(c(5, 10, 20), function(t) {
+  tibble(
+    Threshold    = paste0(">", t, "% Run variance"),
+    N_proteins   = sum(vp_df_out$`Run_ID` * 100 > t),
+    Pct_proteins = round(100 * mean(vp_df_out$`Run_ID` * 100 > t), 1)
+  )
+})
+kable(thresh_tbl, caption = "Proteins with substantial Run-level variance") %>%
+  kable_styling(full_width = FALSE)
+
+kable(vp_df_out %>% slice_max(`Run_ID`, n = 20) %>%
+        mutate(across(where(is.numeric), ~round(.x * 100, 1))),
+      caption = "Top 20 proteins by % Run variance") %>%
+  kable_styling(full_width = FALSE) %>% scroll_box(width = "100%")
+
+kable(vp_df_out %>% arrange(desc(`Run_ID:Bay`)) %>% slice_head(n = 20) %>%
+        mutate(across(where(is.numeric), ~round(.x * 100, 1))),
+      caption = "Top 20 proteins by % Bay (within-Run) variance") %>%
+  kable_styling(full_width = FALSE) %>% scroll_box(width = "100%")
+
+write_csv(vp_df_out, "output_files/variance_partition_results.csv")
+```
+
+---
+
+# E. Replicate-Based ICC Analysis
+
+Uses HIHG biological replicates (same sample run on multiple plates) to estimate:
+- **Within-Run ICC**: reproducibility across Bays within the same Run
+- **Cross-Run ICC**: reproducibility across different Runs (total technical variance)
+
+ICC > 0.9 = excellent; 0.75-0.9 = good; < 0.75 = concerning.
+
+```{r icc-prep, message=FALSE, warning=FALSE}
+library(irr)
+
+rep_obs <- df_reps %>%
+  select(SAMPLE, SAMPLE_ALIQUOT, Run_ID, Bay, all_of(biomarker_cols)) %>%
+  arrange(SAMPLE, Run_ID, Bay) %>%
+  group_by(SAMPLE) %>%
+  mutate(n_runs_for_sample = n_distinct(Run_ID),
+         any_cross_run     = n_runs_for_sample > 1) %>%
+  ungroup()
+
+within_run_reps <- rep_obs %>%
+  group_by(SAMPLE, Run_ID) %>% filter(n() >= 2) %>% ungroup()
+
+cross_run_reps <- rep_obs %>% filter(any_cross_run)
+
+cat("Replicated samples:            ", n_distinct(rep_obs$SAMPLE), "\n")
+cat("  with within-Run replicates:  ", n_distinct(within_run_reps$SAMPLE), "\n")
+cat("  with cross-Run replicates:   ", n_distinct(cross_run_reps$SAMPLE), "\n")
+```
+
+```{r icc-calc, message=FALSE, warning=FALSE}
+calc_icc_per_protein <- function(rep_df, biomarkers, min_pairs = ICC_MIN_REPS) {
+  map_dfr(biomarkers, function(bm) {
+    bm_wide <- rep_df %>%
+      select(SAMPLE, Run_ID, Bay, all_of(bm)) %>%
+      arrange(SAMPLE, Run_ID, Bay) %>%
+      group_by(SAMPLE) %>%
+      mutate(obs_num = row_number()) %>%
+      ungroup() %>%
+      pivot_wider(id_cols = SAMPLE, names_from = obs_num,
+                  values_from = all_of(bm), names_prefix = "rep_") %>%
+      select(-SAMPLE) %>%
+      filter(rowSums(!is.na(.)) >= min_pairs)
+
+    if (nrow(bm_wide) < min_pairs)
+      return(tibble(Biomarker = bm, ICC = NA_real_, lower = NA_real_,
+                    upper = NA_real_, n_pairs = nrow(bm_wide)))
+
+    result <- tryCatch(
+      icc(bm_wide, model = "twoway", type = "agreement", unit = "average"),
+      error = function(e) NULL
+    )
+    if (is.null(result))
+      return(tibble(Biomarker = bm, ICC = NA_real_, lower = NA_real_,
+                    upper = NA_real_, n_pairs = nrow(bm_wide)))
+
+    tibble(Biomarker = bm, ICC = result$value,
+           lower = result$lbound, upper = result$ubound, n_pairs = nrow(bm_wide))
+  })
+}
+
+icc_within <- calc_icc_per_protein(within_run_reps, biomarker_cols)
+icc_cross  <- calc_icc_per_protein(cross_run_reps,  biomarker_cols)
+
+icc_combined <- icc_within %>%
+  rename(ICC_within = ICC, lower_within = lower, upper_within = upper, n_within = n_pairs) %>%
+  left_join(icc_cross %>%
+              rename(ICC_cross = ICC, lower_cross = lower, upper_cross = upper, n_cross = n_pairs),
+            by = "Biomarker") %>%
+  mutate(
+    Category_within = case_when(
+      ICC_within >= 0.9  ~ "Excellent", ICC_within >= 0.75 ~ "Good",
+      ICC_within >= 0.5  ~ "Moderate",  !is.na(ICC_within)  ~ "Poor",
+      TRUE ~ "Insufficient data"),
+    Category_cross = case_when(
+      ICC_cross >= 0.9   ~ "Excellent", ICC_cross >= 0.75  ~ "Good",
+      ICC_cross >= 0.5   ~ "Moderate",  !is.na(ICC_cross)   ~ "Poor",
+      TRUE ~ "Insufficient data")
+  )
+```
+
+```{r icc-plots, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+icc_combined %>%
+  select(Biomarker, ICC_within, ICC_cross) %>%
+  pivot_longer(-Biomarker, names_to = "Level", values_to = "ICC") %>%
+  mutate(Level = recode(Level,
+    ICC_within = "Within-Run (across Bays)", ICC_cross = "Cross-Run")) %>%
+  ggplot(aes(x = ICC, fill = Level)) +
+  geom_histogram(binwidth = 0.05, alpha = 0.7, position = "identity") +
+  geom_vline(xintercept = c(0.75, 0.9), linetype = "dashed", color = "red") +
+  facet_wrap(~ Level) +
+  theme_bw() +
+  labs(title = "ICC distribution by replicate type",
+       subtitle = "Red lines: 0.75 (Good) and 0.90 (Excellent) thresholds",
+       x = "ICC", y = "Count of proteins") +
+  theme(legend.position = "none")
+
+icc_combined %>%
+  summarise(
+    `Within-Run: Excellent (>=0.9)` = sum(Category_within == "Excellent", na.rm=T),
+    `Within-Run: Good (0.75-0.9)`   = sum(Category_within == "Good", na.rm=T),
+    `Within-Run: Moderate/Poor`     = sum(Category_within %in% c("Moderate","Poor"), na.rm=T),
+    `Cross-Run: Excellent (>=0.9)`  = sum(Category_cross  == "Excellent", na.rm=T),
+    `Cross-Run: Good (0.75-0.9)`    = sum(Category_cross  == "Good", na.rm=T),
+    `Cross-Run: Moderate/Poor`      = sum(Category_cross  %in% c("Moderate","Poor"), na.rm=T)
+  ) %>%
+  pivot_longer(everything(), names_to = "Category", values_to = "N proteins") %>%
+  kable(caption = "ICC summary across proteins") %>%
+  kable_styling(full_width = FALSE)
+
+poor_icc <- icc_combined %>%
+  filter(Category_cross %in% c("Moderate", "Poor") | ICC_cross < 0.75)
+
+if (nrow(poor_icc) > 0) {
+  kable(poor_icc %>% arrange(ICC_cross), digits = 3,
+        caption = "Proteins with ICC_cross < 0.75") %>%
+    kable_styling(full_width = FALSE)
+}
+
+write_csv(icc_combined, "output_files/icc_results.csv")
+```
+
+---
+
+# F. Formal Per-Protein Batch Effect Test
+
+Linear model per protein: `NPQ ~ Run_ID + Bay + Race + sex + age_at_subject + Site + Dx`
+
+F-test (Type III) for Run_ID and Bay terms after adjusting for biological covariates.
+FDR correction across proteins within each term.
+
+**Limitation:** Treats Run_ID as fixed — low power with many Runs. Interpret alongside variance partitioning.
+
+```{r formal-test, message=FALSE, warning=FALSE}
+library(car)
+
+test_df <- df_unique %>%
+  filter(!is.na(Race), !is.na(sex), !is.na(age_at_subject),
+         !is.na(Run_ID), !is.na(Bay)) %>%
+  mutate(Dx     = coalesce(CDX, Case_Control),
+         Run_fac = as.factor(Run_ID)) %>%
+  filter(!is.na(Dx))
+
+batch_test_results <- map_dfr(biomarker_cols, function(bm) {
+  y  <- test_df[[bm]]
+  ok <- complete.cases(test_df[, c("Race","sex","age_at_subject","Dx")]) & !is.na(y)
+  if (sum(ok) < 20)
+    return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
+
+  fit <- tryCatch(
+    lm(y[ok] ~ Run_fac + Bay + Race + sex + age_at_subject + Site + Dx,
+       data = test_df[ok, ]),
+    error = function(e) NULL)
+  if (is.null(fit)) return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
+
+  aov_fit <- tryCatch(Anova(fit, type = "III"), error = function(e) NULL)
+  if (is.null(aov_fit)) return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
+
+  aov_df <- as.data.frame(aov_fit)
+  tibble(
+    Biomarker = bm,
+    p_Run = aov_df["Run_fac", "Pr(>F)"],
+    p_Bay = if ("Bay" %in% rownames(aov_df)) aov_df["Bay", "Pr(>F)"] else NA_real_
+  )
+})
+
+batch_test_results <- batch_test_results %>%
+  mutate(FDR_Run = p.adjust(p_Run, "BH"),
+         FDR_Bay = p.adjust(p_Bay, "BH"),
+         Sig_Run = FDR_Run < FDR_THRESHOLD,
+         Sig_Bay = FDR_Bay < FDR_THRESHOLD) %>%
+  arrange(FDR_Run)
+
+cat("Proteins with significant Run effect (FDR <", FDR_THRESHOLD, "):",
+    sum(batch_test_results$Sig_Run, na.rm=TRUE), "\n")
+cat("Proteins with significant Bay effect (FDR <", FDR_THRESHOLD, "):",
+    sum(batch_test_results$Sig_Bay, na.rm=TRUE), "\n")
+
+batch_test_results %>%
+  filter(Sig_Run | Sig_Bay) %>% head(30) %>%
+  kable(digits = 4, caption = "Proteins with significant Run or Bay effect (FDR corrected)") %>%
+  kable_styling(full_width = FALSE)
+
+write_csv(batch_test_results, "output_files/batch_effect_test_results.csv")
+```
+
+---
+
+# G. Summary and Decision
+
+```{r decision, message=FALSE, warning=FALSE}
+n_sig_run      <- sum(batch_test_results$Sig_Run, na.rm=TRUE)
+n_sig_bay      <- sum(batch_test_results$Sig_Bay, na.rm=TRUE)
+n_proteins     <- length(biomarker_cols)
+median_run_var <- median(vp_df_out$`Run_ID`, na.rm=TRUE) * 100
+median_bay_var <- median(vp_df_out$`Run_ID:Bay`, na.rm=TRUE) * 100
+max_run_var    <- max(vp_df_out$`Run_ID`, na.rm=TRUE) * 100
+high_conf      <- conf_results %>% filter(Concern == "HIGH")
+n_poor_icc     <- nrow(poor_icc)
+
+cat("=== BATCH EFFECT SUMMARY ===\n\n")
+cat(sprintf("Formal test:        %d/%d proteins significant Run effect (FDR < %.2f)\n",
+            n_sig_run, n_proteins, FDR_THRESHOLD))
+cat(sprintf("                    %d/%d proteins significant Bay effect\n\n",
+            n_sig_bay, n_proteins))
+cat(sprintf("Variance partition: median Run = %.1f%%, max Run = %.1f%%, median Bay = %.1f%%\n\n",
+            median_run_var, max_run_var, median_bay_var))
+cat(sprintf("ICC:                %d proteins with cross-Run ICC < 0.75\n\n", n_poor_icc))
+
+if (nrow(high_conf) > 0) {
+  cat("HIGH confounding (Cramers V > 0.5):\n")
+  print(high_conf %>% select(Batch_Var, Covariate, CramersV))
+  cat("\n")
+}
+
+cat("=== RECOMMENDATION ===\n\n")
+if (n_sig_run == 0 && median_run_var < 5) {
+  cat("Batch effects MINIMAL.\n")
+  cat("-> Include Run_ID as a fixed covariate in downstream models.\n")
+} else if (median_run_var < 10 && nrow(high_conf) == 0) {
+  cat("Batch effects MODERATE, not strongly confounded with biology.\n")
+  cat("-> Include Run_ID as random effect (lme4) in downstream models.\n")
+  cat("-> OR apply ComBat (sva) for methods that cannot use random effects.\n")
+} else if (nrow(high_conf) > 0) {
+  cat("CAUTION: High confounding detected. ComBat may remove biological signal.\n")
+  cat("-> For association testing: use Run_ID as random effect (lme4) -- preferred.\n")
+  cat("-> For PCA/clustering: ComBat with bio covariates as protected, interpret with caution.\n")
+  cat("-> Run sensitivity analysis with and without correction.\n")
+} else {
+  cat("Batch effects SUBSTANTIAL.\n")
+  cat("-> Apply ComBat (sva::ComBat) with Race + sex + age as protected covariates.\n")
+  cat("-> Validate correction using HIHG replicate ICC post-correction.\n")
+}
+
+cat("\n=== OUTPUT FILES ===\n")
+cat("batch_covariate_confounding.csv  - Cramers V between batch and covariates\n")
+cat("variance_partition_results.csv   - Per-protein variance fractions\n")
+cat("icc_results.csv                  - Per-protein ICC within-Run and cross-Run\n")
+cat("batch_effect_test_results.csv    - Per-protein p/FDR for Run and Bay terms\n")
+```
+
+---
+
+# Dataset Notes
+
+```{r notes, echo=FALSE, results='asis'}
+notes_file <- "notes.md"
+if (file.exists(notes_file)) {
+  cat(paste(readLines(notes_file, warn = FALSE), collapse = "\n"))
+} else {
+  cat("*No notes file found. Create `notes.md` for dataset-specific observations.*\n")
+}
+```

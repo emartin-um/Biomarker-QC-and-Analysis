@@ -2,7 +2,10 @@
 title: "Hemolysis Analysis by Site"
 author: "ERM"
 date: "`r Sys.Date()`"
-output: 
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '3'
   html_document:
     toc: true
     toc_depth: 3
@@ -51,9 +54,16 @@ hemolysis_available <- intersect(hemolysis_markers, names(df))
 cat("Available hemolysis markers:", paste(hemolysis_available, collapse=", "), "\n")
 
 # Define metadata columns (non-biomarker columns)
-metadata_cols <- c("RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID", "newsample",
+# Updated 2026-05-05 for v4 data — added metatada_source, newsamp, CDX_collapsed,
+# Ancestry, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final, APOE4_carrier,
+# APOE4_count, APOE_WGS, APOE4 (NULISA), E4_dose, European_anc_pct.
+metadata_cols <- c("metatada_source", "RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID",
+                   "newsample", "newsamp",
                    "Group", "Ethnicity", "Race", "sex", "age_at_subject",
-                   "CDX", "Case_Control", "AOO", "Years_Onset", "APOE.geno",
+                   "CDX", "CDX_collapsed", "Case_Control", "AOO", "Years_Onset",
+                   "APOE.geno", "APOE.geno_final", "APOE_WGS", "APOE_WGS_norm",
+                   "APOE_WGS_changed", "APOE4_count", "APOE4_carrier", "E4_dose",
+                   "Ancestry", "European_anc_pct",
                    "height_inches", "weight_lb", "BMI", "Site", "Country/State",
                    "country_of_birth", "Group_Race_Ethnicity", "___1", "Run", "Bay")
 

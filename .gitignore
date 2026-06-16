@@ -7,8 +7,13 @@
 # Data files - keep input/output out of version control (but keep .gitkeep)
 **/input_files/**
 **/output_files/**
+**/output_files_*/**
 !**/input_files/.gitkeep
 !**/output_files/.gitkeep
+
+# Backup files (kept on disk for provenance, not in version control)
+*.bak
+*.Rbak
 
 # HTML output from Quarto/Rmd (regenerated from source)
 *.html
