@@ -1,28 +1,88 @@
 ---
 title: "Metadata Merge Pipeline"
 subtitle: "Merge Post-QC Biomarker Data with Metadata"
-date: today
-format:
-  html:
+date: "`r Sys.Date()`"
+output:
+  html_document:
     toc: true
-    toc-float: true
-    toc-depth: 3
-    code-fold: true
-    code-summary: "Show code"
-    embed-resources: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
 params:
   filter_only: false
   no_copy: true
   include_derived_covariates: true
   include_derived_biomarkers: false
   filter_na_covars: true
-  output_dir: "output_files_n2851_2026May"
-  review_dir: "review"   # optional dir holding {CDX,Ancestry}_review.csv (data-driven Step 6b)
-editor: visual
+  input_dir: "input_files"   # where NPQ + metadata are read from (override for the example/ run or an alt location)
+  output_dir: "output_files"   # neutral default; each run (QC_Runs/) overrides with its own dated dir
+  review_dir: "review"   # optional dir holding {CDX,Ancestry}_review.csv (data-driven Step 6b) and Duplicate_review.csv (lab dup decisions)
+  known_repeats_file: null   # optional path to Esther's Dup_sample_or_ind_*.xlsx; null = auto-detect in input_files/ then ../../../Datasets/
+knit: |
+  (function(input, ...) {
+    od  <- tryCatch(rmarkdown::yaml_front_matter(input)$params$output_dir, error = function(e) NULL)
+    if (is.null(od) || !nzchar(od)) od <- "output_files"
+    tag <- sub("^output_files_?", "", basename(od)); if (!nzchar(tag)) tag <- basename(od)
+    rmarkdown::render(input, output_file = paste0("Metadata_Merge_Pipeline_", tag, ".html"))
+  })
 ---
 
 <!--
-CHANGELOG — Metadata_Merge_Pipeline.qmd
+CHANGELOG — Metadata_Merge_Pipeline.Rmd
+  2026-06-17: mapping_key_Ancestry now ALWAYS written. Previously it was written only when
+   <review_dir>/Ancestry_review.csv existed; runs using the built-in ancestry_config (no review CSV)
+   silently produced no key even though the HTML output-files list (~L1859) always advertises it.
+   Added an else branch that writes the built-in-config mapping (Group × Race × Ethnicity → Ancestry,
+   n_in_batch), parallel to mapping_key_CDX which always writes when dx_config exists.
+  2026-06-16 (a): APOE handling + error-report restructure.
+   * Step 6d: REMOVED the swap-affected Sanger masking. APOE.geno_final now DEFAULTS TO WGS where
+     available (Sanger only when WGS missing); on disagreement WGS wins. No sample-specific plate-swap
+     correction lives in this general pipeline — the AD-Hispanic swap re-map belongs with the affected
+     batch (QC_Runs/<run>/WGS_Midi_Remap/). Disagreements are surfaced so the swap stays recognizable.
+   * APOE error reporting split: `error_APOE_integrity` = Sanger-vs-WGS *concordance* check (fires only
+     when BOTH genotypes exist and disagree); `error_APOE_no_genotype` = no APOE call from either source.
+     The by-sample summary counts only APOE_no_genotype (not discordance); APOE dropped from the
+     missing-critical set to avoid double-counting.
+   * Combined workbook: missing-data expanded into one drill-down sheet per critical field (Missing or 0
+     CDX / Race / Ethnicity / Sex / Age) after missing_data_summary; redundant missing_data_by_sample and
+     QC_error_summary sheets omitted from the workbook (standalone files still written). SUMMARY gained a
+     blank `notes` column; error_unexpected_race_ethnicity gained a blank `Suggested_Coding` column.
+  2026-06-15 (f): reports/ organized into sub-folders — `errors/` (error_* checks), `missing_data/`
+   (missing_data_by_sample + summary), `duplicates/` (Duplicate_review + Longitudinal_review). The
+   overviews (QC_error_report_combined / _by_sample / _summary), mapping keys, and the CDX×Case_Control
+   crosstab stay at the reports/ top level. (wr() gained a `subdir` arg.)
+  2026-06-15 (e): reports — ALL reports now written as .xlsx (incl. Duplicate_review / Longitudinal_review;
+   the dup-override read accepts <review_dir>/Duplicate_review.xlsx, .csv still honored). Added a
+   consolidated `QC_error_report_by_sample.xlsx` (one row per flagged sample: per-check flags + n_issues
+   + issues) and `QC_error_summary.xlsx` (per-check flagged counts + batch totals); both also appear as
+   sheets in QC_error_report_combined.xlsx.
+  2026-06-15 (d): robustness — `input_dir` param (default "input_files"; lets the example/ run + alt
+   locations read elsewhere). Step 6c built-in-config preview no longer counts `Ancestry` before it is
+   applied (applies the config to a throwaway copy) — fixes a crash on the no-review-CSV path. Step 8
+   falls back to raw `CDX` when `CDX_collapsed` is absent (covariates-off runs). Verified by rendering
+   the synthetic example and the ALZ123 reproduction end-to-end.
+  2026-06-15 (c): QC reports — added `metadata_source` (provenance) + `ID2` to per-sample report
+   context; normalize the older `metatada_source` typo at load. New `QC_error_report_combined.xlsx`
+   bundles every error/issue report into one workbook (SUMMARY sheet + one sheet per check) so the
+   QC picture can be sent as a single file (per-issue files still written; mapping keys/crosstab excluded).
+  2026-06-15 (b): converted Quarto .qmd -> R Markdown .Rmd for repo consistency (everything else is
+   .Rmd). YAML `knit:` function auto-names the HTML after `params$output_dir` (e.g.
+   Metadata_Merge_Pipeline_n2851_2026May.html) so each run's report is unique — replaces the old
+   render_metadata_merge.R wrapper (removed). Quarto callouts (::: {.callout-*}) became Bootstrap
+   .alert fenced divs (::: {.alert .alert-*}), which html_document styles.
+   Chunk `#|` options are kept (knitr >= 1.35 supports them).
+  2026-06-15 (a):
+   * Duplicate + longitudinal cross-check is METADATA-DRIVEN (cross-batch): duplicates = same SAMPLE on
+     >1 RUN, longitudinal = same Record_ID on >1 SAMPLE, detected from the full metadata file so they are
+     flagged even when the two runs' biomarkers live in different batches (a standard check). Esther's
+     list (Datasets/Dup_sample_or_ind_*.xlsx, param `known_repeats_file`) is the confirmation cross-check.
+     - Duplicates: provisional keep = most-recent RUN among runs WITH biomarkers in this merge, OVERRIDABLE
+       by lab via <review_dir>/Duplicate_review.csv (mark the run to keep with FINAL_keep="keep"). In a
+       per-batch merge with only one run present, nothing is excluded; in a combined merge both are present.
+     - Writes reports/Duplicate_review.csv + reports/Longitudinal_review.csv (cross-batch, reconciled to
+       Esther's list: known-not-detected vs detected-not-listed).
+     - Writes filtered/filtered_combined_duplicates.csv = BOTH runs of every duplicate that have biomarkers
+       here (replicate feed for Replicate_Analysis; symmetric partner to filtered_combined_longitudinal.csv).
   2026-06-12 (propagated from the 8-plate run copy):
    * Step 6b is data-driven from `<review_dir>/{CDX,Ancestry}_review.csv` when present (edit the
      FINAL_* columns to regroup); falls back to the built-in config below when the CSVs are absent.
@@ -47,7 +107,8 @@ library(kableExtra)
 
 # Configuration
 PRIMARY_QC_OUTPUT <- "../Primary_QC/output_files"
-INPUT_DIR <- "input_files"
+INPUT_DIR <- if (!is.null(params$input_dir) && nzchar(params$input_dir)) params$input_dir else "input_files"
+DATASETS_DIR <- "../../../Datasets"   # source data lives outside the repo (see combine_metadata.R)
 OUTPUT_DIR <- params$output_dir
 NPQ_STANDARD_FILE <- "NPQ_post_QC.csv"
 NPQ_LOW_FILE <- "NPQ_Low_post_QC.csv"
@@ -76,7 +137,8 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 
 1.  **Input Files** - Verify/copy post-QC files from Primary_QC
 2.  **Merge Data** - Merge biomarker data with metadata (APOE.geno normalized to `"a/b"` format)
-3.  **Quality Control** - Identify duplicates, implausible values, and issues
+2b. **Known Duplicate / Longitudinal Cross-Check** *(optional, if `Dup_sample_or_ind_*.xlsx` present)* — load the lab's independent list to cross-check Steps 3 & 8
+3.  **Quality Control** - Identify duplicates, implausible values, and issues. Duplicates keep the most-recent run **provisionally**, overridable by the lab via `<review_dir>/Duplicate_review.csv`; both runs are written to `filtered/filtered_combined_duplicates.csv` for Replicate_Analysis
 4.  **Apply Filters** - Create final analysis-ready datasets
 5.  **Exclusion Summary** - Review filtered sample counts
 6.  **Covariate Groupings** *(optional: `include_derived_covariates`, default TRUE)* — explore distributions (6a), define configs (6b), preview decisions (6c), apply + validate + filter (6d); joins WGS APOE genotypes, produces CDX_collapsed, Ancestry, APOE_WGS, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final (WGS preferred), APOE4_carrier, APOE4_count; rows excluded by default when either covariate is NA (`filter_na_covars`)
@@ -90,8 +152,8 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 #| results: asis
 
 if (FILTER_ONLY) {
-  cat("::: {.callout-note}\n")
-  cat("## Filter-Only Mode\n")
+  cat("::: {.alert .alert-info}\n")
+  cat("**Filter-Only Mode**\n\n")
   cat("Running in **filter-only mode** - using existing merged files and exclusion report.\n")
   cat(":::\n")
 }
@@ -115,6 +177,21 @@ find_metadata_file <- function(input_dir) {
   }
 
   return(metadata_files)
+}
+
+# Locate the analyst-maintained known duplicate / longitudinal list
+# (Esther's Dup_sample_or_ind_*.xlsx). Honors an explicit path, else auto-detects
+# the most recent match in input_files/ then the external Datasets/ folder.
+find_known_repeats_file <- function(explicit = NULL, dirs = c(INPUT_DIR, DATASETS_DIR)) {
+  if (!is.null(explicit) && nzchar(explicit) && file.exists(explicit)) return(explicit)
+  for (d in dirs) {
+    if (!dir.exists(d)) next
+    cand <- list.files(d, pattern = "Dup_sample_or_ind.*\\.xlsx$",
+                       full.names = TRUE, ignore.case = TRUE)
+    cand <- cand[!grepl("^~\\$", basename(cand))]   # skip Excel lock files
+    if (length(cand)) return(cand[which.max(file.mtime(cand))])
+  }
+  NA_character_
 }
 
 find_latest_npq_files <- function(output_dir) {
@@ -191,6 +268,9 @@ if (!FILTER_ONLY) {
 if (!FILTER_ONLY) {
   # Load metadata
   metadata <- read_csv(metadata_file, show_col_types = FALSE)
+  # Robustness: older metadata files carry a `metatada_source` typo — normalize to `metadata_source`.
+  if ("metatada_source" %in% names(metadata) && !"metadata_source" %in% names(metadata))
+    metadata <- dplyr::rename(metadata, metadata_source = metatada_source)
   metadata <- metadata %>%
     rename(APOE.geno = APOE) %>%
     mutate(
@@ -305,8 +385,8 @@ if (!FILTER_ONLY) {
   unmatched_samples <- samples_not_in_metadata %>% filter(!is_technical_rep)
 
   if (nrow(unmatched_samples) > 0) {
-    cat("::: {.callout-warning}\n")
-    cat("### ", nrow(unmatched_samples), " Sample(s) Not in Metadata\n\n", sep = "")
+    cat("::: {.alert .alert-warning}\n")
+    cat("**", nrow(unmatched_samples), " Sample(s) Not in Metadata**\n\n", sep = "")
     cat("These samples are in NPQ files but NOT in metadata:\n\n")
     for (s in unmatched_samples$SampleID) {
       cat("- `", s, "`\n", sep = "")
@@ -337,6 +417,84 @@ if (!FILTER_ONLY) {
 }
 ```
 
+# Known Duplicate / Longitudinal Cross-Check {#known-repeats}
+
+The lab maintains an independent list of intentional **duplicate** samples (same `SAMPLE`
+run on two plates) and **longitudinal** samples (same subject `Record_ID`, different draws)
+in `Dup_sample_or_ind_*.xlsx`. We load it here so Step 3 (duplicates) and Step 8
+(longitudinal) can cross-check their automatic detection against it. If the file is absent
+the pipeline runs exactly as before.
+
+```{r}
+#| label: known-repeats-load
+#| echo: false
+#| results: asis
+
+KNOWN_REPEATS_FILE <- params$known_repeats_file
+known_path         <- find_known_repeats_file(KNOWN_REPEATS_FILE)
+HAVE_KNOWN_REPEATS <- !is.na(known_path) && requireNamespace("readxl", quietly = TRUE)
+
+known_dups_df <- NULL; known_long_df <- NULL
+known_dup_samples <- character(0); known_long_records <- character(0)
+
+if (HAVE_KNOWN_REPEATS) {
+  .sheets     <- readxl::excel_sheets(known_path)
+  .dup_sheet  <- .sheets[grepl("dup",      .sheets, ignore.case = TRUE)][1]
+  .long_sheet <- .sheets[grepl("longitud", .sheets, ignore.case = TRUE)][1]
+
+  if (!is.na(.dup_sheet)) {
+    known_dups_df <- suppressMessages(readxl::read_excel(known_path, sheet = .dup_sheet)) %>%
+      mutate(SAMPLE = as.character(SAMPLE),
+             SAMPLE_ALIQUOT = as.character(SAMPLE_ALIQUOT))
+    known_dup_samples <- unique(known_dups_df$SAMPLE)
+  }
+  if (!is.na(.long_sheet)) {
+    known_long_df <- suppressMessages(readxl::read_excel(known_path, sheet = .long_sheet)) %>%
+      mutate(SAMPLE = as.character(SAMPLE),
+             Record_ID = as.character(Record_ID))
+    known_long_records <- unique(known_long_df$Record_ID)
+  }
+
+  cat(sprintf(paste0("Loaded `%s`:\n\n",
+                     "- **%d** known duplicate sample IDs (%d run records)\n",
+                     "- **%d** known longitudinal subjects (%d draw records)\n\n"),
+              basename(known_path),
+              length(known_dup_samples),  if (is.null(known_dups_df)) 0L else nrow(known_dups_df),
+              length(known_long_records), if (is.null(known_long_df)) 0L else nrow(known_long_df)))
+} else if (is.na(known_path)) {
+  cat("*No `Dup_sample_or_ind_*.xlsx` found in `input_files/` or `Datasets/` — ",
+      "duplicate/longitudinal cross-check skipped (automatic detection still runs).*\n\n", sep = "")
+} else {
+  cat("*Package `readxl` not installed — known duplicate/longitudinal cross-check skipped.*\n\n")
+}
+
+# ── Metadata-level (cross-batch) detection ────────────────────────────────────
+# The metadata file spans ALL batches, so duplicates (same SAMPLE on >1 RUN) and longitudinal
+# subjects (same Record_ID on >1 SAMPLE) are detected here even when the two runs' biomarkers were
+# assayed in different batches. This is the standard, biomarker-independent check. The keep/exclude
+# decision (Step 3) still operates only on the runs that have biomarkers in the current merge, so the
+# pipeline behaves correctly whether run per-batch or on a combined dataset.
+meta_all <- if (exists("metadata")) metadata else tryCatch(
+  suppressMessages(readr::read_csv(find_metadata_file(INPUT_DIR), show_col_types = FALSE)),
+  error = function(e) NULL)
+
+meta_dups <- NULL; meta_long <- NULL
+if (!is.null(meta_all) && all(c("SAMPLE", "RUN", "Record_ID") %in% names(meta_all))) {
+  .ma <- meta_all %>% mutate(across(any_of(c("SAMPLE", "SAMPLE_ALIQUOT", "Record_ID", "RUN")), as.character))
+  meta_dups <- .ma %>% group_by(SAMPLE)    %>% filter(dplyr::n_distinct(RUN)    > 1) %>% ungroup()
+  meta_long <- .ma %>% group_by(Record_ID) %>% filter(dplyr::n_distinct(SAMPLE) > 1) %>% ungroup()
+}
+meta_dup_samples  <- if (is.null(meta_dups)) character(0) else unique(meta_dups$SAMPLE)
+meta_long_records <- if (is.null(meta_long)) character(0) else unique(meta_long$Record_ID)
+
+if (!is.null(meta_dups)) {
+  cat(sprintf(paste0("**Metadata-level detection (all batches in the metadata file):**\n\n",
+                     "- **%d** duplicate sample ID(s) — same SAMPLE on >1 RUN\n",
+                     "- **%d** longitudinal subject(s) — same Record_ID on >1 SAMPLE\n\n"),
+              length(meta_dup_samples), length(meta_long_records)))
+}
+```
+
 # Step 3: Quality Control {#step3}
 
 ```{r}
@@ -347,42 +505,174 @@ if (!FILTER_ONLY) {
 if (!FILTER_ONLY) {
   cat("## Duplicate Samples\n\n")
 
+  .REPORTS_DIR <- file.path(OUTPUT_DIR, "reports")
+  dir.create(.REPORTS_DIR, showWarnings = FALSE, recursive = TRUE)
+  .review_dir <- if (!is.null(params$review_dir)) params$review_dir else "review"
+
+  # Optional lab override: <review_dir>/Duplicate_review.xlsx (or .csv) — mark the run to KEEP with
+  # FINAL_keep = "keep" (per SAMPLE_ALIQUOT). Any duplicate group with at least one "keep"
+  # is resolved by it (all other runs excluded); groups with no "keep" fall back to the
+  # provisional rule (most-recent RUN). Blank = no decision yet.
+  dup_override <- NULL
+  .dup_xlsx <- file.path(.review_dir, "Duplicate_review.xlsx")
+  .dup_csv  <- file.path(.review_dir, "Duplicate_review.csv")
+  .dup_override_path <- if (file.exists(.dup_xlsx)) .dup_xlsx else if (file.exists(.dup_csv)) .dup_csv else NA_character_
+  if (!is.na(.dup_override_path)) {
+    .dro <- if (grepl("\\.xlsx$", .dup_override_path) && requireNamespace("readxl", quietly = TRUE))
+              suppressMessages(readxl::read_excel(.dup_override_path))
+            else suppressMessages(read_csv(.dup_override_path, show_col_types = FALSE))
+    dup_override <- .dro %>%
+      transmute(SAMPLE_ALIQUOT = as.character(SAMPLE_ALIQUOT),
+                FINAL_keep = tolower(trimws(as.character(FINAL_keep)))) %>%
+      filter(FINAL_keep %in% c("keep", "exclude"))
+    if (nrow(dup_override) == 0) dup_override <- NULL
+  }
+
   duplicate_report <- merged_combined %>%
+    mutate(SAMPLE = as.character(SAMPLE),
+           SAMPLE_ALIQUOT = as.character(SAMPLE_ALIQUOT)) %>%
     group_by(SAMPLE) %>%
     filter(n() > 1) %>%
     arrange(SAMPLE, RUN) %>%
     mutate(
-      run_order = row_number(),
-      max_run = max(RUN),
-      exclude = RUN != max_run,
-      exclude_reason = if_else(exclude, paste0("Duplicate - keeping most recent run (", max_run, ")"), NA_character_)
+      run_order        = row_number(),
+      n_runs           = n(),
+      max_run          = suppressWarnings(max(RUN)),  # suppressWarnings: harmless when 0 dup groups
+      is_known_dup     = SAMPLE %in% known_dup_samples,
+      provisional_keep = RUN == max_run            # default rule: keep most-recent RUN
     ) %>%
     ungroup()
 
-  if (nrow(duplicate_report) > 0) {
-    n_dup_samples <- n_distinct(duplicate_report$SAMPLE)
-    n_to_exclude <- sum(duplicate_report$exclude)
-
-    cat("Found **", n_dup_samples, "** samples with multiple runs (", nrow(duplicate_report), " total records)\n\n", sep = "")
-    cat("- **", n_to_exclude, "** older runs will be excluded\n", sep = "")
-    cat("- **", nrow(duplicate_report) - n_to_exclude, "** most recent runs will be kept\n\n", sep = "")
-
-    dup_summary <- duplicate_report %>%
+  # Resolve keep/exclude: lab override (FINAL_keep) where present, else provisional.
+  if (!is.null(dup_override)) {
+    duplicate_report <- duplicate_report %>%
+      left_join(dup_override, by = "SAMPLE_ALIQUOT") %>%
       group_by(SAMPLE) %>%
-      summarise(
-        n_runs = n(),
-        runs = paste(RUN, collapse = ", "),
-        kept_run = max(RUN),
-        .groups = "drop"
+      mutate(group_has_keep = any(FINAL_keep %in% "keep")) %>%
+      ungroup() %>%
+      mutate(
+        has_override = group_has_keep,
+        keep_final   = case_when(
+          FINAL_keep %in% "keep" ~ TRUE,
+          group_has_keep         ~ FALSE,   # group resolved by a "keep" on another run
+          TRUE                   ~ provisional_keep
+        )
       )
-
-    kable(dup_summary, caption = "Duplicate Samples") %>%
-      kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
-      print()
-
   } else {
-    cat("No duplicate samples found. ✓\n")
+    duplicate_report <- duplicate_report %>%
+      mutate(has_override = FALSE, keep_final = provisional_keep)
   }
+
+  duplicate_report <- duplicate_report %>%
+    mutate(
+      exclude         = !keep_final,
+      decision_source = if_else(has_override,
+                                "lab-confirmed (Duplicate_review.csv)",
+                                "provisional (most-recent RUN; pending lab review)"),
+      exclude_reason  = if_else(exclude,
+        paste0("Duplicate SAMPLE ", SAMPLE, " - ", decision_source),
+        NA_character_)
+    )
+
+  biom_aliquots <- as.character(merged_combined$SAMPLE_ALIQUOT)
+
+  # ── (B) Metadata-level (cross-batch) standard check + lab review template + reconciliation ──
+  if (!is.null(meta_dups)) {
+    meta_dup_report <- meta_dups %>%
+      mutate(in_known_list       = SAMPLE %in% known_dup_samples,
+             has_biomarkers_here = SAMPLE_ALIQUOT %in% biom_aliquots) %>%
+      group_by(SAMPLE) %>%
+      mutate(n_runs                      = dplyr::n(),
+             n_runs_with_biomarkers_here = sum(has_biomarkers_here),
+             .max_present = if (any(has_biomarkers_here)) max(RUN[has_biomarkers_here]) else NA_character_,
+             provisional_keep = !is.na(.max_present) & RUN == .max_present) %>%
+      ungroup() %>% select(-.max_present)
+
+    n_resolvable <- meta_dup_report %>% filter(n_runs_with_biomarkers_here >= 2) %>%
+                      distinct(SAMPLE) %>% nrow()
+    cat("Detected **", length(meta_dup_samples),
+        "** duplicate sample(s) in the metadata (same SAMPLE on >1 RUN, all batches); **",
+        n_resolvable, "** have ≥2 runs with biomarkers in *this* merge (a keep is selected here) — ",
+        "the rest await their other run in a combined run.\n\n", sep = "")
+
+    if (HAVE_KNOWN_REPEATS && length(known_dup_samples) > 0) {
+      .knd <- setdiff(known_dup_samples, meta_dup_samples)   # on list, not in this metadata
+      .dnk <- setdiff(meta_dup_samples, known_dup_samples)   # in metadata, not on list (verify)
+      cat("**Cross-check vs lab's known list:** ", length(intersect(meta_dup_samples, known_dup_samples)),
+          " concordant ✓; ", length(.knd), " on list but not in this metadata; ",
+          length(.dnk), " in metadata but not on list (verify).\n\n", sep = "")
+      if (length(.dnk) > 0) {
+        kable(meta_dup_report %>% filter(SAMPLE %in% .dnk) %>%
+                select(any_of(c("SAMPLE","SAMPLE_ALIQUOT","RUN","Record_ID","CDX","Site"))),
+              caption = "Metadata duplicates NOT on the lab's known list — verify") %>%
+          kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) %>% print()
+      }
+    }
+
+    .ctx_dup <- intersect(c("metadata_source","Record_ID","sex","age_at_subject","CDX",
+                            "Case_Control","APOE.geno","Site"), names(meta_dup_report))
+    dup_review_out <- meta_dup_report %>%
+      mutate(dup_group = SAMPLE, FINAL_keep = "") %>%        # lab marks the run to keep
+      select(SAMPLE, dup_group, SAMPLE_ALIQUOT, RUN, n_runs, n_runs_with_biomarkers_here,
+             has_biomarkers_here, in_known_list, provisional_keep, FINAL_keep, any_of(.ctx_dup)) %>%
+      arrange(SAMPLE, RUN)
+    .ddir <- file.path(.REPORTS_DIR, "duplicates"); dir.create(.ddir, showWarnings = FALSE, recursive = TRUE)
+    if (requireNamespace("writexl", quietly = TRUE)) writexl::write_xlsx(dup_review_out, file.path(.ddir, "Duplicate_review.xlsx")) else write_csv(dup_review_out, file.path(.ddir, "Duplicate_review.csv"), na = "")
+    cat("Lab decision template (all batches) → `reports/duplicates/Duplicate_review.xlsx` ",
+        "(mark the run to keep with `FINAL_keep = \"keep\"`, copy to `", .review_dir,
+        "/`, re-run).\n\n", sep = "")
+  } else if (nrow(duplicate_report) > 0) {
+    # Fallback: metadata lacks SAMPLE/RUN/Record_ID — use the in-merge duplicates for the review file.
+    meta_dup_samples <- unique(duplicate_report$SAMPLE)
+    .ctx_dup <- intersect(c("Record_ID","sex","age_at_subject","CDX","Case_Control","APOE.geno","Site"),
+                          names(merged_combined))
+    dup_review_out <- duplicate_report %>%
+      mutate(dup_group = SAMPLE, FINAL_keep = "") %>%
+      select(SAMPLE, dup_group, SAMPLE_ALIQUOT, RUN, n_runs, in_known_list = is_known_dup,
+             provisional_keep, FINAL_keep, decision_source, any_of(.ctx_dup)) %>%
+      arrange(SAMPLE, RUN)
+    .ddir <- file.path(.REPORTS_DIR, "duplicates"); dir.create(.ddir, showWarnings = FALSE, recursive = TRUE)
+    if (requireNamespace("writexl", quietly = TRUE)) writexl::write_xlsx(dup_review_out, file.path(.ddir, "Duplicate_review.xlsx")) else write_csv(dup_review_out, file.path(.ddir, "Duplicate_review.csv"), na = "")
+  } else {
+    meta_dup_samples <- character(0)
+  }
+
+  # ── (C) Keep/exclude summary for duplicates resolvable in THIS merge ──
+  if (nrow(duplicate_report) > 0) {
+    n_in_merge   <- n_distinct(duplicate_report$SAMPLE)
+    n_to_exclude <- sum(duplicate_report$exclude)
+    n_lab        <- n_distinct(duplicate_report$SAMPLE[duplicate_report$has_override])
+    cat("In this merge, **", n_in_merge, "** duplicate sample(s) have ≥2 runs with biomarkers: **",
+        n_to_exclude, "** run(s) excluded; **", n_lab, "** lab-confirmed, ", n_in_merge - n_lab,
+        " provisional (most-recent RUN).\n\n", sep = "")
+    dup_summary <- duplicate_report %>% group_by(SAMPLE) %>%
+      summarise(n_runs = dplyr::first(n_runs), is_known = dplyr::first(is_known_dup),
+                runs = paste(RUN, collapse = ", "), kept_run = paste(RUN[keep_final], collapse = ", "),
+                decision = dplyr::first(decision_source), .groups = "drop") %>%
+      arrange(decision, SAMPLE)
+    kable(dup_summary, caption = "Duplicates resolvable in this merge — kept run + decision") %>%
+      kable_styling(bootstrap_options = c("striped","hover","condensed"), full_width = FALSE) %>% print()
+  } else {
+    cat("No duplicate sample has >1 run with biomarkers in this merge (nothing to exclude here).\n\n")
+  }
+
+  # ── (D) Replicate feed: all runs WITH biomarkers here for metadata-duplicate samples ──
+  # Symmetric partner to filtered_combined_longitudinal.csv; both runs of a duplicate are retained
+  # for cross-plate concordance in Replicate_Analysis (in a per-batch merge only the present run(s) appear).
+  dup_keep_lut <- duplicate_report %>% select(SAMPLE_ALIQUOT, keep_final, decision_source)
+  filtered_dups <- merged_combined %>%
+    mutate(SAMPLE = as.character(SAMPLE), SAMPLE_ALIQUOT = as.character(SAMPLE_ALIQUOT)) %>%
+    filter(SAMPLE %in% meta_dup_samples) %>%
+    left_join(dup_keep_lut, by = "SAMPLE_ALIQUOT") %>%
+    mutate(dup_group = SAMPLE, provisional_keep = keep_final,
+           decision_source = coalesce(decision_source, "single run in this merge")) %>%
+    arrange(SAMPLE, RUN) %>%
+    relocate(dup_group, provisional_keep, decision_source, .after = SAMPLE)
+  write_csv(filtered_dups, file.path(OUTPUT_DIR, "filtered", "filtered_combined_duplicates.csv"))
+  .n_pairs <- filtered_dups %>% count(SAMPLE) %>% filter(n >= 2) %>% nrow()
+  cat("Replicate feed → `filtered/filtered_combined_duplicates.csv`: **", nrow(filtered_dups),
+      "** run-row(s) across **", n_distinct(filtered_dups$SAMPLE), "** sample(s); **", .n_pairs,
+      "** have ≥2 runs here (usable cross-plate replicate pairs).\n\n", sep = "")
 }
 ```
 
@@ -462,8 +752,8 @@ if (!FILTER_ONLY) {
     )
 
   if (nrow(unexpected_race_eth) > 0) {
-    cat("::: {.callout-note}\n")
-    cat("### Flagged for Review (Not Auto-Excluded)\n\n")
+    cat("::: {.alert .alert-info}\n")
+    cat("**Flagged for Review (Not Auto-Excluded)**\n\n")
     cat("Found **", nrow(unexpected_race_eth), "** samples with potentially unexpected Race/Ethnicity combinations.\n\n", sep = "")
     cat("These are flagged in the exclusion report but **not automatically excluded**.\n")
     cat("Review and manually set `exclude=TRUE` if needed.\n")
@@ -816,15 +1106,18 @@ if (INCLUDE_DERIVED_COVARS) {
       caption = "Ancestry mapping (source: Ancestry_review.csv FINAL_Ancestry; blank = excluded)"),
       bootstrap_options = c("striped", "condensed"), full_width = FALSE))
   } else {
+    # No Ancestry_review.csv: preview the built-in config's mapping. `Ancestry` isn't applied to
+    # filtered_combined until Step 6d, so apply it to a throwaway copy here just for the preview count.
+    .anc_preview <- apply_grouping_config(filtered_combined, ancestry_config)
     print(kable_styling(kable(
-      filtered_combined %>% count(Group, Race, Ethnicity, Ancestry) %>% arrange(Ancestry, desc(n)),
+      .anc_preview %>% count(Group, Race, Ethnicity, Ancestry) %>% arrange(Ancestry, desc(n)),
       caption = "Ancestry mapping (applied: Group × Race × Ethnicity → Ancestry)"),
       bootstrap_options = c("striped", "condensed"), full_width = FALSE))
   }
 
   if (nrow(anc_summary$unmatched) > 0) {
-    cat("\n::: {.callout-warning}\n")
-    cat("#### Unmatched rows — will be excluded\n\n")
+    cat("\n::: {.alert .alert-warning}\n")
+    cat("**Unmatched rows — will be excluded**\n\n")
     kable(anc_summary$unmatched) %>%
       kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
       print()
@@ -863,12 +1156,13 @@ if (INCLUDE_DERIVED_COVARS) {
   cat(sprintf("**Rows before grouping:** %d | **After:** %d | **Removed:** %d\n\n",
               n_before, n_after, n_before - n_after))
 
-  # ---- Join WGS APOE genotypes (NO plate-swap correction applied) ----
-  # WGS is read from the same auto-detected metadata; used where available, Sanger APOE.geno as
-  # fallback. The 2026-06 AD-Hispanic WGS plate-swap is NOT corrected here (the 2026-06-08
-  # ..._plateswapcorrected_2026Jun.csv was wrong and is archived); instead the swap-affected
-  # samples are masked below so APOE.geno_final falls back to Sanger for them, pending USUHS
-  # confirmation. See ../../../May_2026_WGS_QC/WGS_Plate_Swap_Summary_2026Jun11.md.
+  # ---- Join WGS APOE genotypes ----
+  # WGS is read from the auto-detected metadata. APOE.geno_final DEFAULTS TO WGS where available
+  # (Sanger APOE.geno is used only when WGS is missing) — so on a Sanger-vs-WGS disagreement, WGS
+  # wins. This general pipeline applies NO sample-specific plate-swap correction; the AD-Hispanic
+  # WGS plate-swap disagreements are surfaced in the `error_APOE_integrity` report (step 5) so the
+  # swap stays recognizable, and the sample-specific re-map lives with the affected batch
+  # (e.g. QC_Runs/<run>/WGS_Midi_Remap/), not here.
   wgs_src <- read_csv(metadata_file, show_col_types = FALSE)
   if ("APOE_WGS" %in% names(wgs_src)) {
     wgs_lookup <- wgs_src %>%
@@ -891,16 +1185,10 @@ if (INCLUDE_DERIVED_COVARS) {
     select(-any_of("APOE_WGS")) %>%
     left_join(wgs_lookup, by = "SAMPLE_ALIQUOT")
 
-  # Mask swap-affected AD-Hispanic samples -> APOE.geno_final falls back to Sanger for them.
-  .swap_idmap <- "../../../May_2026_WGS_QC/WGS_chr1_corrected_idmap_2026Jun11.csv"
-  if (file.exists(.swap_idmap)) {
-    .affected <- read_csv(.swap_idmap, show_col_types = FALSE)$SAMPLE_aslabeled
-    filtered_combined <- filtered_combined %>%
-      mutate(APOE_WGS_norm = if_else(as.character(SAMPLE) %in% as.character(.affected),
-                                     NA_character_, APOE_WGS_norm))
-  }
+  # (No plate-swap masking here — WGS is the default; see header note. Disagreements are reported
+  #  by error_APOE_integrity; the sample-specific re-map is run in the affected batch's folder.)
 
-  # APOE4 carrier variables — derived from WGS-corrected genotype where available
+  # APOE4 carrier variables — derived from WGS-preferred genotype where available
   filtered_combined <- filtered_combined %>%
     mutate(
       # Flag samples where WGS genotype differs from original (both non-NA)
@@ -974,8 +1262,8 @@ if (INCLUDE_DERIVED_BIOMARKS) {
   missing_combined <- required_cols[!required_cols %in% names(filtered_combined)]
 
   if (length(missing_combined) > 0) {
-    cat("::: {.callout-warning}\n")
-    cat("### Missing Source Columns\n\n")
+    cat("::: {.alert .alert-warning}\n")
+    cat("**Missing Source Columns**\n\n")
     cat("Missing in filtered_combined: ", paste(missing_combined, collapse = ", "), "\n")
     cat(":::\n\n")
   } else {
@@ -1076,13 +1364,16 @@ cat(sprintf(paste0("- All post-QC samples: **%d**\n",
 filtered_combined <- filtered_cross
 
 if (n_rep_subj > 0) {
+  # Use the collapsed diagnosis when covariates were derived (Step 6); else fall back to raw CDX
+  # (so this step also runs when include_derived_covariates = FALSE).
+  .cdx_col <- if ("CDX_collapsed" %in% names(filtered_long)) "CDX_collapsed" else "CDX"
   repeat_tbl <- filtered_long %>%
     group_by(Record_ID) %>%
     summarise(
       n_visits = dplyr::first(n_visits),
       ages = paste(age_at_subject[order(subject_visit_n)], collapse = " / "),
-      CDX  = paste(CDX_collapsed[order(subject_visit_n)], collapse = " / "),
-      cdx_changed = dplyr::n_distinct(CDX_collapsed) > 1,   # diagnosis differs across visits
+      CDX  = paste(.data[[.cdx_col]][order(subject_visit_n)], collapse = " / "),
+      cdx_changed = dplyr::n_distinct(.data[[.cdx_col]]) > 1,   # diagnosis differs across visits
       RUNs = paste(RUN[order(subject_visit_n)], collapse = " / "),
       .groups = "drop"
     ) %>% arrange(desc(cdx_changed), Record_ID)
@@ -1094,6 +1385,66 @@ if (n_rep_subj > 0) {
 
   cat(sprintf("\n%d of %d longitudinal subject(s) have a diagnosis change across visits.\n\n",
               sum(repeat_tbl$cdx_changed), nrow(repeat_tbl)))
+}
+
+# ── Metadata-level (cross-batch) longitudinal cross-check ──────────────────────
+# Detection is METADATA-driven (same Record_ID on >1 SAMPLE across ALL batches), so a subject is
+# flagged even if their visits' biomarkers are in different batches. The cross-sectional/longitudinal
+# SPLIT above stays biomarker-based (only samples with biomarkers can populate a dataset).
+if (!is.null(meta_long) || (HAVE_KNOWN_REPEATS && length(known_long_records) > 0)) {
+  .REP <- file.path(OUTPUT_DIR, "reports"); dir.create(.REP, showWarnings = FALSE, recursive = TRUE)
+  .biom_aliq   <- as.character(flagged$SAMPLE_ALIQUOT)   # all samples with biomarkers in this merge
+  in_data_long <- unique(filtered_long$Record_ID)        # subjects with >=2 visits WITH biomarkers here
+
+  meta_long_report <- if (!is.null(meta_long)) {
+    meta_long %>% group_by(Record_ID) %>%
+      summarise(n_samples_meta = dplyr::n_distinct(SAMPLE),
+                SAMPLEs_meta    = paste(sort(unique(SAMPLE)), collapse = " / "),
+                RUNs_meta       = paste(RUN[order(RUN)], collapse = " / "),
+                n_visits_with_biomarkers_here = sum(SAMPLE_ALIQUOT %in% .biom_aliq),
+                .groups = "drop")
+  } else tibble(Record_ID = character())
+
+  kn <- if (HAVE_KNOWN_REPEATS && !is.null(known_long_df)) {
+    known_long_df %>% group_by(Record_ID) %>%
+      summarise(known_n_draws  = dplyr::n(),
+                known_SAMPLEs  = paste(unique(SAMPLE), collapse = " / "),
+                known_RUNs     = paste(RUN, collapse = " / "),
+                known_ResultQC = if ("ResultQC" %in% names(known_long_df)) paste(ResultQC, collapse = " / ") else NA_character_,
+                .groups = "drop")
+  } else tibble(Record_ID = character())
+
+  det <- if (n_rep_subj > 0) {
+    repeat_tbl %>% transmute(Record_ID, n_visits_in_data = n_visits, ages_in_data = ages,
+                             CDX_in_data = CDX, cdx_changed, RUNs_in_data = RUNs)
+  } else tibble(Record_ID = character())
+
+  recon_long <- tibble(Record_ID = Reduce(union, list(meta_long_records, known_long_records, in_data_long))) %>%
+    left_join(meta_long_report, by = "Record_ID") %>%
+    left_join(kn,  by = "Record_ID") %>%
+    left_join(det, by = "Record_ID") %>%
+    mutate(
+      in_metadata      = Record_ID %in% meta_long_records,
+      in_known_list    = Record_ID %in% known_long_records,
+      detected_in_data = Record_ID %in% in_data_long,
+      status = case_when(
+        in_metadata &  in_known_list ~ "concordant (metadata + lab list)",
+        in_metadata & !in_known_list ~ "in metadata, not on lab list (verify)",
+        !in_metadata & in_known_list ~ "on lab list, not in this metadata",
+        TRUE                         ~ "detected in data only"
+      )
+    ) %>%
+    arrange(status, Record_ID)
+
+  .ldir <- file.path(.REP, "duplicates"); dir.create(.ldir, showWarnings = FALSE, recursive = TRUE)
+  if (requireNamespace("writexl", quietly = TRUE)) writexl::write_xlsx(recon_long, file.path(.ldir, "Longitudinal_review.xlsx")) else write_csv(recon_long, file.path(.ldir, "Longitudinal_review.csv"), na = "")
+
+  cat("\n**Longitudinal cross-check (metadata-level, all batches):** ",
+      length(meta_long_records), " subject(s) in metadata; ",
+      sum(recon_long$status == "concordant (metadata + lab list)"), " concordant with the lab list ✓; ",
+      sum(recon_long$status == "in metadata, not on lab list (verify)"), " in metadata not on list; ",
+      sum(recon_long$detected_in_data), " have ≥2 visits with biomarkers in *this* merge.\n",
+      "Full reconciliation → `reports/duplicates/Longitudinal_review.xlsx`.\n\n", sep = "")
 }
 ```
 
@@ -1146,24 +1497,37 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
   dir.create(REPORTS_DIR, showWarnings = FALSE, recursive = TRUE)
   .review_dir <- if (exists("REVIEW_DIR")) REVIEW_DIR else if (!is.null(params$review_dir)) params$review_dir else "review"
 
+  # Robustness: normalize the `metatada_source` typo (older metadata) and guarantee the provenance/
+  # identifier columns the reports carry (`metadata_source`, `ID2`) are present even if a file lacks them.
+  if ("metatada_source" %in% names(merged_combined) && !"metadata_source" %in% names(merged_combined))
+    merged_combined <- dplyr::rename(merged_combined, metadata_source = metatada_source)
+  for (.c in c("metadata_source", "ID2")) if (!.c %in% names(merged_combined)) merged_combined[[.c]] <- NA_character_
+
   .miss <- function(x) is.na(x) | trimws(as.character(x)) %in% c("", "Missing", "NA", "Unknown")
-  .ctx  <- intersect(c("SAMPLE_ALIQUOT","SAMPLE","Record_ID","Site","Group","Race","Ethnicity",
-                       "sex","age_at_subject","CDX","Case_Control","APOE.geno","APOE_WGS"),
+  .ctx  <- intersect(c("metadata_source","SAMPLE_ALIQUOT","SAMPLE","Record_ID","ID2","Site","Group",
+                       "Race","Ethnicity","sex","age_at_subject","CDX","Case_Control","APOE.geno","APOE_WGS"),
                      names(merged_combined))
   .valid_apoe <- c("2/2","2/3","2/4","3/3","3/4","4/4")
   .written <- character(0)
+  .all_reports <- list()                          # collected for the single combined workbook
   .xlsx_ok <- requireNamespace("writexl", quietly = TRUE)
-  wr <- function(df, f) {
+  # Reports are grouped into sub-folders of reports/ via `subdir` (errors/, missing_data/, duplicates/);
+  # overviews + mapping keys stay at the reports/ top level (subdir = "").
+  wr <- function(df, f, combine = TRUE, subdir = "") {
     base <- sub("\\.csv$", "", f)
+    .dir <- file.path(REPORTS_DIR, subdir)
+    if (nzchar(subdir)) dir.create(.dir, showWarnings = FALSE, recursive = TRUE)
+    rel  <- if (nzchar(subdir)) file.path(subdir, base) else base
     # Reports are written as .xlsx so Excel keeps APOE genotypes ("3/4") as text (no date
     # conversion). Fall back to .csv only if the writexl package is unavailable.
     if (.xlsx_ok) {
-      writexl::write_xlsx(df, file.path(REPORTS_DIR, paste0(base, ".xlsx")))
-      .written <<- c(.written, sprintf("`%s.xlsx` — %d row(s)", base, nrow(df)))
+      writexl::write_xlsx(df, file.path(.dir, paste0(base, ".xlsx")))
+      .written <<- c(.written, sprintf("`%s.xlsx` — %d row(s)", rel, nrow(df)))
     } else {
-      readr::write_csv(df, file.path(REPORTS_DIR, f), na = "")
-      .written <<- c(.written, sprintf("`%s` (install writexl for .xlsx) — %d row(s)", f, nrow(df)))
+      readr::write_csv(df, file.path(.dir, f), na = "")
+      .written <<- c(.written, sprintf("`%s` (install writexl for .xlsx) — %d row(s)", rel, nrow(df)))
     }
+    if (combine) .all_reports[[base]] <<- df      # collect error/issue reports for the combined file
   }
 
   # 1. Mapping keys (shareable) -----------------------------------------------
@@ -1175,12 +1539,23 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
          mutate(CDX_collapsed = unname(.cdx_lut[CDX]),
                 status = if_else(is.na(CDX_collapsed), "EXCLUDED", "kept")) %>%
          arrange(is.na(CDX_collapsed), desc(n_in_batch)),
-       "mapping_key_CDX.csv")
+       "mapping_key_CDX.csv", combine = FALSE)
   }
   if (file.exists(file.path(.review_dir, "Ancestry_review.csv"))) {
     wr(suppressMessages(read_csv(file.path(.review_dir, "Ancestry_review.csv"), show_col_types = FALSE)) %>%
          select(any_of(c("Group","Race","Ethnicity","n_in_batch","FINAL_Ancestry","unexpected_race_eth"))),
-       "mapping_key_Ancestry.csv")
+       "mapping_key_Ancestry.csv", combine = FALSE)
+  } else if ("Ancestry" %in% names(merged_combined) ||
+             (exists("ancestry_config") && exists("apply_grouping_config"))) {
+    # No Ancestry_review.csv: write the built-in config's mapping anyway, so the shareable key always
+    # exists (parallel to mapping_key_CDX, which writes whenever dx_config exists). Mirrors the display
+    # branch (~L1106). `Ancestry` is already applied to merged_combined by Step 6d in normal runs;
+    # apply_grouping_config() is a defensive fallback if it isn't.
+    .anc_src <- if ("Ancestry" %in% names(merged_combined)) merged_combined
+                else apply_grouping_config(merged_combined, ancestry_config)
+    wr(.anc_src %>% count(Group, Race, Ethnicity, Ancestry, name = "n_in_batch") %>%
+         arrange(Ancestry, desc(n_in_batch)),
+       "mapping_key_Ancestry.csv", combine = FALSE)
   }
 
   # 2. Implausible values ------------------------------------------------------
@@ -1193,41 +1568,55 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
       mutate(variable = v, value = x[hit],
              expected_range = paste0("[", plausible[[v]][1], ", ", plausible[[v]][2], "]"))
   }
-  wr(if (length(.impl)) bind_rows(.impl) else merged_combined[0, .ctx], "error_implausible_values.csv")
+  wr(if (length(.impl)) bind_rows(.impl) else merged_combined[0, .ctx], "error_implausible_values.csv", subdir = "errors")
 
   # 3. Unexpected Race/Ethnicity ----------------------------------------------
   g <- merged_combined$Group_Race_Ethnicity
   unexp_idx <- which(
     (grepl("BL",g)&grepl("WH",g)) | (grepl("HI",g)&grepl("NH",g)) | (grepl("AA",g)&grepl("WH",g)) |
     (grepl("AFDC",g)&grepl("WH",g)) | (grepl("AFDC",g)&grepl("HI",g)) | (grepl("AA",g)&grepl("HI",g)))
-  wr(merged_combined[unexp_idx, c(.ctx, "Group_Race_Ethnicity")] %>% distinct(),
-     "error_unexpected_race_ethnicity.csv")
+  wr(merged_combined[unexp_idx, c(.ctx, "Group_Race_Ethnicity")] %>% distinct() %>%
+       mutate(Suggested_Coding = ""),   # blank — reviewer's suggested Group_Race_Ethnicity recoding
+     "error_unexpected_race_ethnicity.csv", subdir = "errors")
 
   # 4. Missing data ------------------------------------------------------------
-  md <- merged_combined %>% transmute(SAMPLE_ALIQUOT, SAMPLE, Record_ID, Site,
+  md <- merged_combined %>% transmute(metadata_source, SAMPLE_ALIQUOT, SAMPLE, Record_ID, ID2, Site,
     miss_CDX=.miss(CDX), miss_Group=.miss(Group), miss_Race=.miss(Race), miss_Ethnicity=.miss(Ethnicity),
     miss_sex=.miss(sex), miss_age=.miss(age_at_subject),
     miss_APOE_Sanger=.miss(APOE.geno), miss_APOE_WGS=.miss(APOE_WGS),
     miss_APOE_any=.miss(APOE.geno) & .miss(APOE_WGS))
-  # by-sample report flags CRITICAL missingness only (WGS-missing is the norm, kept as a column);
-  # the summary below still tallies every field incl. Sanger/WGS coverage.
-  .crit <- c("miss_CDX","miss_Race","miss_Ethnicity","miss_sex","miss_age","miss_APOE_any")
-  wr(md %>% filter(if_any(all_of(.crit), ~ .x)), "missing_data_by_sample.csv")
+  # by-sample report flags CRITICAL missingness only (WGS-missing is the norm, kept as a column).
+  # APOE "no call from either source" is intentionally NOT critical here, to avoid double-counting —
+  # it is reported separately as the by-sample APOE_no_genotype flag (step 8). The summary below
+  # still tallies every field incl. APOE Sanger/WGS coverage and APOE_any.
+  .crit <- c("miss_CDX","miss_Race","miss_Ethnicity","miss_sex","miss_age")
+  wr(md %>% filter(if_any(all_of(.crit), ~ .x)), "missing_data_by_sample.csv", subdir = "missing_data")
   wr(md %>% summarise(across(starts_with("miss_"), sum)) %>%
        pivot_longer(everything(), names_to="field", values_to="n_missing") %>%
        mutate(field=sub("^miss_","",field), pct_missing=round(100*n_missing/nrow(md),1)) %>%
-       arrange(desc(n_missing)), "missing_data_summary.csv")
+       arrange(desc(n_missing)), "missing_data_summary.csv", subdir = "missing_data")
 
-  # 5. APOE integrity (Sanger vs WGS discordance + invalid format) -------------
+  # 5. APOE integrity (concordance) — requires TWO genotypes: flag a sample only
+  #    when it has BOTH a valid Sanger AND a valid WGS call that DISAGREE. Samples
+  #    with one call (or none) cannot be integrity-checked and are not flagged
+  #    here. (Discordance is the contested WGS plate-swap signal, also tracked in
+  #    Secondary_QC/APOE.) `no_apoe_geno` (no usable call from either source) is
+  #    derived here too; it feeds the by-sample summary's APOE error (step 8).
   .nrm <- function(x){ x<-trimws(as.character(x)); ifelse(!is.na(x)&nchar(x)==2, paste0(substr(x,1,1),"/",substr(x,2,2)), x) }
   ap <- merged_combined %>% mutate(
-    wgs_norm = .nrm(APOE_WGS), sanger = as.character(APOE.geno),
-    discordant     = !.miss(sanger) & !.miss(wgs_norm) & sanger != wgs_norm,
-    invalid_sanger = !.miss(sanger) & !(sanger %in% .valid_apoe),
-    invalid_wgs    = !.miss(wgs_norm) & !(wgs_norm %in% .valid_apoe))
-  wr(ap %>% filter(discordant|invalid_sanger|invalid_wgs) %>%
-       select(all_of(.ctx), wgs_norm, discordant, invalid_sanger, invalid_wgs),
-     "error_APOE_integrity.csv")
+    wgs_norm     = .nrm(APOE_WGS), sanger = as.character(APOE.geno),
+    sanger_ok    = !.miss(sanger)   & sanger   %in% .valid_apoe,
+    wgs_ok       = !.miss(wgs_norm) & wgs_norm %in% .valid_apoe,
+    discordant   = sanger_ok & wgs_ok & sanger != wgs_norm,   # both present & valid, disagree
+    no_apoe_geno = !sanger_ok & !wgs_ok)                      # no usable call from either source
+  wr(ap %>% filter(discordant) %>%
+       select(all_of(.ctx), wgs_norm, discordant),
+     "error_APOE_integrity.csv", subdir = "errors")
+  # No APOE call from either source (full per-sample detail) — feeds the by-sample
+  # APOE error (step 8) and gets its own sheet in the combined workbook.
+  wr(ap %>% filter(no_apoe_geno) %>%
+       select(all_of(.ctx), wgs_norm, sanger_ok, wgs_ok, no_apoe_geno),
+     "error_APOE_no_genotype.csv", subdir = "errors")
 
   # 6. Clinical consistency ----------------------------------------------------
   caselike <- function(x) grepl("AD|Case|Dementia|Lewy|Cog Imp", x, ignore.case=TRUE)
@@ -1238,8 +1627,8 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
     cdx_casecontrol_conflict = (caselike(CDX)&ctrllike(Case_Control)) | (ctrllike(CDX)&caselike(Case_Control)))
   wr(cl %>% filter(aoo_gt_age | (cdx_casecontrol_conflict %in% TRUE)) %>%
        select(all_of(.ctx), AOO, Years_Onset, aoo_gt_age, cdx_casecontrol_conflict),
-     "error_clinical_consistency.csv")
-  wr(merged_combined %>% count(CDX, Case_Control) %>% arrange(desc(n)), "check_CDX_vs_CaseControl_crosstab.csv")
+     "error_clinical_consistency.csv", subdir = "errors")
+  wr(merged_combined %>% count(CDX, Case_Control) %>% arrange(desc(n)), "check_CDX_vs_CaseControl_crosstab.csv", combine = FALSE)
 
   # 7. Categorical integrity ---------------------------------------------------
   wr(merged_combined %>% mutate(
@@ -1248,12 +1637,103 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
        bad_race = !.miss(Race) & !grepl(" ", Race) & !(Race %in% c("BL","WH","MU","AI"))) %>%
        filter(bad_sex|bad_ethnicity|bad_race) %>%
        select(all_of(.ctx), bad_sex, bad_ethnicity, bad_race),
-     "error_categorical_unexpected_levels.csv")
+     "error_categorical_unexpected_levels.csv", subdir = "errors")
   wr(merged_combined %>% group_by(SAMPLE_ALIQUOT) %>% filter(n()>1) %>% ungroup() %>% select(all_of(.ctx)),
-     "error_duplicate_SAMPLE_ALIQUOT.csv")
+     "error_duplicate_SAMPLE_ALIQUOT.csv", subdir = "errors")
 
-  # 8. NPQ-not-in-metadata is NOT duplicated here — it already exists in the output root as
+  # 8. Consolidated QC error report — BY SAMPLE + SUMMARY -----------------------
+  # One row per flagged sample (which checks tripped, n_issues, issues list) and a per-check summary.
+  # Derived from the per-issue reports collected above (each carries SAMPLE_ALIQUOT).
+  # APOE error counted here = "no APOE call from either source" (error_APOE_no_genotype,
+  # the 36). The integrity/discordance report (error_APOE_integrity) is NOT counted in
+  # the by-sample summary — it needs two genotypes and is tracked separately.
+  .err_checks <- c(
+    implausible_value         = "error_implausible_values",
+    unexpected_race_ethnicity = "error_unexpected_race_ethnicity",
+    missing_critical_field    = "missing_data_by_sample",
+    APOE_no_genotype          = "error_APOE_no_genotype",
+    clinical_inconsistency    = "error_clinical_consistency",
+    categorical_bad_level     = "error_categorical_unexpected_levels",
+    duplicate_SAMPLE_ALIQUOT  = "error_duplicate_SAMPLE_ALIQUOT")
+  .flag_ids <- lapply(.err_checks, function(rep) {
+    d <- .all_reports[[rep]]
+    if (!is.null(d) && "SAMPLE_ALIQUOT" %in% names(d)) unique(as.character(d$SAMPLE_ALIQUOT)) else character(0)
+  })
+  by_sample <- merged_combined %>% select(all_of(.ctx)) %>% distinct() %>%
+    mutate(SAMPLE_ALIQUOT = as.character(SAMPLE_ALIQUOT))
+  .flagcols <- names(.flag_ids)
+  for (fl in .flagcols) by_sample[[fl]] <- by_sample$SAMPLE_ALIQUOT %in% .flag_ids[[fl]]
+  .flagmat <- as.matrix(by_sample[.flagcols])
+  by_sample$n_issues <- as.integer(rowSums(.flagmat))
+  by_sample$issues   <- apply(.flagmat, 1, function(r) paste(.flagcols[r], collapse = "; "))
+  by_sample <- by_sample %>% filter(n_issues > 0) %>%
+    arrange(desc(n_issues), SAMPLE_ALIQUOT) %>%
+    relocate(n_issues, issues, .after = SAMPLE_ALIQUOT)
+  wr(by_sample, "QC_error_report_by_sample.csv")   # xlsx + a sheet in the combined workbook
+
+  err_summary <- tibble(check = names(.flag_ids),
+                        n_samples_flagged = vapply(.flag_ids, length, integer(1))) %>%
+    arrange(desc(n_samples_flagged)) %>%
+    bind_rows(tibble(check = c("— TOTAL samples in batch —", "— samples with >=1 issue —"),
+                     n_samples_flagged = c(dplyr::n_distinct(merged_combined$SAMPLE_ALIQUOT), nrow(by_sample))))
+  wr(err_summary, "QC_error_summary.csv")          # xlsx + a sheet in the combined workbook
+
+  # 9. NPQ-not-in-metadata is NOT duplicated here — it already exists in the output root as
   #    samples_not_in_metadata.csv (Step 2); it is referenced in the "Files to Send" section.
+
+  # ── Combined single-file error report (sendable as ONE file) ───────────────────
+  # One workbook: SUMMARY (per-check row count + status) → per-check sheets, with the
+  # missing-data block expanded into one drill-down sheet PER critical field (built
+  # from merged_combined, only fields that actually have samples). The lumped
+  # missing_data_by_sample and the QC_error_summary sheets are intentionally omitted
+  # here — redundant (missing detail = the per-field sheets; per-check overview =
+  # SUMMARY). Their standalone files are still written above.
+  if (length(.all_reports) > 0) {
+    .miss_specs <- list(
+      c(sheet = "Missing or 0 CDX",  field = "CDX"),
+      c(sheet = "Missing Race",      field = "Race"),
+      c(sheet = "Missing Ethnicity", field = "Ethnicity"),
+      c(sheet = "Missing Sex",       field = "sex"),
+      c(sheet = "Missing Age",       field = "age_at_subject"))
+    .field_sheets <- list()
+    for (s in .miss_specs) {
+      fld <- s[["field"]]; sht <- s[["sheet"]]; v <- merged_combined[[fld]]
+      idx <- if (fld == "CDX") which(.miss(v) | trimws(as.character(v)) == "0") else which(.miss(v))
+      if (length(idx)) .field_sheets[[sht]] <- merged_combined[idx, .ctx, drop = FALSE]
+    }
+    .pick <- function(nm) if (!is.null(.all_reports[[nm]])) setNames(list(.all_reports[[nm]]), nm) else list()
+    .body <- c(
+      .pick("error_implausible_values"),
+      .pick("error_unexpected_race_ethnicity"),
+      .pick("missing_data_summary"),
+      .field_sheets,
+      .pick("error_APOE_no_genotype"),
+      .pick("error_APOE_integrity"),
+      .pick("error_clinical_consistency"),
+      .pick("error_categorical_unexpected_levels"),
+      .pick("error_duplicate_SAMPLE_ALIQUOT"),
+      .pick("QC_error_report_by_sample"))
+    # SUMMARY = per-check overview; the per-field drill-down sheets are detail, not listed
+    .chk <- setdiff(names(.body), names(.field_sheets))
+    .summary <- tibble(check = .chk, n_rows = vapply(.body[.chk], nrow, integer(1))) %>%
+      mutate(status = if_else(n_rows > 0, "review", "clean"), notes = "") %>%  # notes = blank, for reviewer assignments
+      arrange(desc(n_rows), check)
+    if (.xlsx_ok) {
+      .combined <- c(list(SUMMARY = .summary), .body)
+      names(.combined) <- substr(make.unique(substr(names(.combined), 1, 31), sep = "_"), 1, 31)  # Excel 31-char sheet limit
+      writexl::write_xlsx(.combined, file.path(REPORTS_DIR, "QC_error_report_combined.xlsx"))
+      .written <- c(.written, sprintf("`QC_error_report_combined.xlsx` — **one file**, %d sheet(s): SUMMARY + per-check + per-missing-field detail",
+                                      length(.combined)))
+    } else {
+      .long <- bind_rows(lapply(names(.body), function(n) {
+        d <- .body[[n]]; if (!nrow(d)) return(NULL)
+        d %>% mutate(across(everything(), as.character), check = n)
+      }))
+      readr::write_csv(.summary, file.path(REPORTS_DIR, "QC_error_report_combined_summary.csv"), na = "")
+      if (!is.null(.long)) readr::write_csv(relocate(.long, check), file.path(REPORTS_DIR, "QC_error_report_combined.csv"), na = "")
+      .written <- c(.written, "`QC_error_report_combined.csv` + `_summary.csv` — one-file fallback (install writexl for a multi-sheet .xlsx)")
+    }
+  }
 
   cat("Reports written to `", REPORTS_DIR, "/`:\n\n", sep = "")
   for (w in .written) cat("- ", w, "\n", sep = "")
@@ -1299,10 +1779,20 @@ cat("- `output_files/sample_exclusion_report.csv` - Full exclusion report\n")
 if (file.exists(file.path(OUTPUT_DIR, "samples_not_in_metadata.csv"))) {
   cat("- `output_files/samples_not_in_metadata.csv` - Samples missing from metadata\n")
 }
+if (file.exists(file.path(OUTPUT_DIR, "reports", "duplicates", "Duplicate_review.xlsx"))) {
+  cat("- `output_files/reports/duplicates/Duplicate_review.xlsx` - **Lab-editable** duplicate decisions ",
+      "(mark the run to keep with `FINAL_keep = \"keep\"`, copy to the review dir, re-run)\n", sep = "")
+}
+if (file.exists(file.path(OUTPUT_DIR, "reports", "duplicates", "Longitudinal_review.xlsx"))) {
+  cat("- `output_files/reports/duplicates/Longitudinal_review.xlsx` - Longitudinal reconciliation vs lab's known list\n")
+}
+if (file.exists(file.path(OUTPUT_DIR, "reports", "QC_error_report_by_sample.xlsx"))) {
+  cat("- `output_files/reports/QC_error_report_by_sample.xlsx` - **QC errors by sample** (one row per flagged sample) + `QC_error_summary.xlsx`\n")
+}
 ```
 
-::: callout-tip
-## Pipeline Complete!
+::: {.alert .alert-success}
+**Pipeline Complete!**
 
 Filtered datasets are ready for downstream analysis in `output_files/filtered/`.
 :::
@@ -1334,7 +1824,7 @@ if (exists("REPORTS_DIR") && dir.exists(REPORTS_DIR)) {
     if (grepl("\\.xlsx$", p)) nrow(suppressMessages(readxl::read_excel(p)))
     else nrow(suppressMessages(readr::read_csv(p, show_col_types = FALSE)))
   }
-  .rp <- function(base) file.path(REPORTS_DIR, paste0(base, ".", .ext))
+  .rp <- function(base, sub = "") file.path(REPORTS_DIR, sub, paste0(base, ".", .ext))
 
   cat("Outputs below go to the contributing groups for **review / verification**. ",
       "Reports are written as `.", .ext, "`",
@@ -1348,18 +1838,41 @@ if (exists("REPORTS_DIR") && dir.exists(REPORTS_DIR)) {
   }
 
   cat("\n### 2. Data-issue reports — correct & verify (⚠ = has flags, ✓ = clean)\n\n")
-  for (b in c("error_implausible_values", "error_unexpected_race_ethnicity", "missing_data_by_sample",
-              "error_APOE_integrity", "error_clinical_consistency", "error_categorical_unexpected_levels",
-              "error_duplicate_SAMPLE_ALIQUOT")) {
-    n <- .rows(.rp(b))
-    if (!is.na(n)) cat(sprintf("- %s `reports/%s.%s` — %d flagged\n", if (n > 0) "⚠" else "✓", b, .ext, n))
+  .comb_xlsx <- file.path(REPORTS_DIR, "QC_error_report_combined.xlsx")
+  .comb_csv  <- file.path(REPORTS_DIR, "QC_error_report_combined.csv")
+  if (file.exists(.comb_xlsx)) {
+    cat("- 📦 **`reports/QC_error_report_combined.xlsx`** — **all checks in ONE file** (SUMMARY sheet + one sheet per check). Send this single file; the per-issue files below are the same content split out.\n")
+  } else if (file.exists(.comb_csv)) {
+    cat("- 📦 **`reports/QC_error_report_combined.csv`** (+ `_summary.csv`) — all checks bundled into one file.\n")
+  }
+  .bys <- .rp("QC_error_report_by_sample")
+  if (file.exists(.bys)) cat(sprintf("- 👤 **`reports/QC_error_report_by_sample.%s`** — one row per flagged sample (checks tripped, `n_issues`, `issues`) — %d sample(s)\n", .ext, .rows(.bys)))
+  .esum <- .rp("QC_error_summary")
+  if (file.exists(.esum)) cat(sprintf("- 📊 `reports/QC_error_summary.%s` — per-check flagged counts + batch totals\n", .ext))
+
+  cat("\n**Error reports** — `reports/errors/`:\n")
+  for (b in c("error_implausible_values", "error_unexpected_race_ethnicity",
+              "error_APOE_integrity", "error_APOE_no_genotype", "error_clinical_consistency",
+              "error_categorical_unexpected_levels", "error_duplicate_SAMPLE_ALIQUOT")) {
+    n <- .rows(.rp(b, "errors"))
+    if (!is.na(n)) cat(sprintf("- %s `reports/errors/%s.%s` — %d flagged\n", if (n > 0) "⚠" else "✓", b, .ext, n))
+  }
+  cat("\n**Missing-data reports** — `reports/missing_data/`:\n")
+  for (b in c("missing_data_by_sample", "missing_data_summary")) {
+    n <- .rows(.rp(b, "missing_data"))
+    if (!is.na(n)) cat(sprintf("- %s `reports/missing_data/%s.%s` — %d row(s)\n", if (n > 0) "⚠" else "✓", b, .ext, n))
+  }
+  cat("\n**Duplicate / longitudinal sample reports** — `reports/duplicates/`:\n")
+  for (b in c("Duplicate_review", "Longitudinal_review")) {
+    n <- .rows(.rp(b, "duplicates"))
+    if (!is.na(n)) cat(sprintf("- `reports/duplicates/%s.%s` — %d row(s)\n", b, .ext, n))
   }
   nn <- .rows(file.path(OUTPUT_DIR, "samples_not_in_metadata.csv"))
-  if (!is.na(nn)) cat(sprintf("- %s `samples_not_in_metadata.csv` (output root) — %d NPQ samples lacking metadata\n",
+  if (!is.na(nn)) cat(sprintf("\n- %s `samples_not_in_metadata.csv` (output root) — %d NPQ samples lacking metadata\n",
                               if (nn > 0) "⚠" else "✓", nn))
 
   cat("\n### Supporting context (not action items)\n\n")
-  cat(sprintf("- `reports/missing_data_summary.%s` — per-field missingness incl. APOE Sanger / WGS / any\n", .ext))
+  cat(sprintf("- `reports/mapping_key_CDX.%s`, `reports/mapping_key_Ancestry.%s` — grouping keys (top level)\n", .ext, .ext))
   cat(sprintf("- `reports/check_CDX_vs_CaseControl_crosstab.%s` — CDX × Case_Control cross-tab\n", .ext))
   cat("\n*Internal, do not send:* `sample_exclusion_report.csv` (drives sample filtering).\n\n")
 } else {

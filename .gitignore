@@ -7,8 +7,13 @@
 # Data files - keep input/output out of version control (but keep .gitkeep)
 **/input_files/**
 **/output_files/**
+**/output_files_*/**
 !**/input_files/.gitkeep
 !**/output_files/.gitkeep
+
+# Backup files (kept on disk for provenance, not in version control)
+*.bak
+*.Rbak
 
 # HTML output from Quarto/Rmd (regenerated from source)
 *.html
@@ -36,8 +41,20 @@ Rplots.pdf
 **/*.xlsx
 **/*.rds
 
+# Figure images (regenerated from scripts; keep the code repo free of generated plots)
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.svg
+**/*.tif
+**/*.tiff
+
 # Old/archived files
 /old/
+
+# Archived / backed-up run outputs (kept on disk for provenance, not in version control)
+**/_archive*/
+**/_backup*/
 
 # Dataset-specific notes (not tracked - each dataset has its own)
 notes.md

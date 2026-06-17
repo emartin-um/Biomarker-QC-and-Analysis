@@ -13,6 +13,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Secondary QC examining the relationship between APOE genotype and APOE/APOE4 protein levels. Flags samples whose protein signal is inconsistent with their genotype (extreme outliers by genotype group), and compares WGS-derived genotypes against the original array/clinical genotypes.
 
+> **Update (2026-06-15) — WGS plate-swap: investigation ongoing, NO correction applied.** The large Sanger-vs-WGS discordance this document investigated (137 samples) was traced to a **WGS sample mix-up** on the AD-Hispanic plate set. ⚠️ The original **2026-06-08 geometric relabel** (`apply_wgs_plate_swap_correction.R`, which produced `..._plateswapcorrected_2026Jun.csv` and the "discordance now 12" result) was later **REFUTED and reverted** — it used the wrong (2026-06-06) idmap and the wrong direction. The current understanding (2026-06-11, chr1 genotype concordance): the **WGS is the mislabeled platform** via a MIDI re-array swap; the canonical pipeline now **masks the ~282 swap-affected AD-Hispanic samples to Sanger** (Metadata_Merge Step 6d, via `WGS_chr1_corrected_idmap_2026Jun11.csv`) — it does **not** relabel. A standalone re-map (`QC_Runs/QC_ALZ123_repro_2026Jun/WGS_Midi_Remap/remap_wgs_midi_plateswap.R`, WGS-vs-Sanger agreement 47%→99.6%) exists as a **PROPOSAL pending USUHS confirmation** — not yet applied. **For the affected AD-Hispanic samples, prefer Sanger (`APOE.geno`); do not rely on the WGS-corrected `APOE.geno_final` there.** See `../../../May_2026_WGS_QC/WGS_Plate_Swap_Summary_2026Jun11.md`. The separate `20251124-1407_Bay1` biomarker assay anomaly is unrelated and still stands.
+
 ## Script
 
 **`APOE_geno_protein.qmd`** — single self-contained Quarto document. Reads from the Metadata_Merge filtered output and the WGS metadata file in this folder.
@@ -21,8 +23,8 @@ Secondary QC examining the relationship between APOE genotype and APOE/APOE4 pro
 
 | File | Description |
 |---|---|
-| `../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv` | Post-QC merged data with `APOE.geno`, `APOE`, `APOE4` columns |
-| `U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv` | Metadata file with `APOE_WGS` column (WGS-derived genotypes for ~502 samples) |
+| `../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv` | Post-QC merged data with `APOE.geno`, `APOE`, `APOE4`, **and `APOE_WGS` / `APOE.geno_final`** columns (WGS join + plate-swap correction already applied upstream in Metadata_Merge Step 6d) |
+| `U19_Alamar_metadata_2026Jan16_with_WGSAPOE.csv` | **Legacy fallback only** — the old ~502-sample WGS lookup, used only if `APOE_WGS` is absent from the filtered input (it no longer is). Also still read by the "0-of-284 test" section to identify *newly-added* WGS calls. |
 
 ### Analysis
 
@@ -31,7 +33,7 @@ Secondary QC examining the relationship between APOE genotype and APOE/APOE4 pro
 2. **WGS comparison** — joins `APOE_WGS` by `SAMPLE_ALIQUOT` and reports:
    - How many samples have WGS data and how many gain a genotype (were previously NA)
    - Concordance rate and cross-tabulation of original vs. WGS calls
-   - Table of discordant samples (~30 samples where calls differ)
+   - Table of discordant samples (**12** after the June-2026 plate-swap correction; was 137 pre-correction)
    - Side-by-side boxplots (original vs. WGS genotype) with discordant samples highlighted in purple
    - Re-run of 3×IQR outlier detection using WGS genotype — reports resolved, new, and persistent outliers
 
@@ -49,16 +51,20 @@ Secondary QC examining the relationship between APOE genotype and APOE/APOE4 pro
 |---|---|
 | `APOE4_minus_APOE_extreme_outliers_by_genotype.xlsx` | Extreme outliers flagged using **original** genotype |
 | `Outliers_Ranked.xlsx` | All samples ranked by deviation from genotype median (original genotype) |
-| `APOE4_minus_APOE_WGS_outliers.xlsx` | Extreme outliers flagged using **WGS** genotype (~502 samples with WGS only) |
+| `APOE4_minus_APOE_WGS_outliers.xlsx` | Extreme outliers flagged using **WGS** genotype (~1,500 dual-typed samples) |
+| `Sanger_vs_WGS_biomarker_flags.xlsx` | Per-sample Sanger-vs-WGS discordant flags (**12** after plate-swap correction) |
+| `Biomarker_batch_mismatch_flags.xlsx` | Concordant-genotype samples whose biomarker disagrees — the `20251124-1407_Bay1` assay anomaly (~59 samples) |
 | `APOE4_minus_APOE_final_outliers.xlsx` | Extreme outliers flagged using **APOE.geno_final** (all samples — primary output) |
 | `Outliers_Ranked_Final.xlsx` | All samples ranked by deviation from genotype median using **APOE.geno_final** |
 
 ## WGS Genotype Integration (Downstream)
 
-The Metadata_Merge pipeline (Step 6d) now joins `APOE_WGS` and produces:
+The Metadata_Merge pipeline (Step 6d) joins `APOE_WGS` (from the plate-swap-corrected metadata) and produces:
 
 - `APOE.geno_final` — best available genotype (WGS preferred, original as fallback)
-- `APOE_WGS_changed` — logical flag for samples whose genotype was corrected by WGS
-- `APOE4_carrier` / `APOE4_count` — now derived from `APOE.geno_final`
+- `APOE_WGS_changed` — logical flag for samples whose genotype was corrected by WGS (**now 12**, down from 137 before the June-2026 plate-swap correction)
+- `APOE4_carrier` / `APOE4_count` — derived from `APOE.geno_final`
 
 **Downstream analyses should use `APOE.geno_final` instead of `APOE.geno`** when genotype accuracy matters. `APOE.geno` (original) is retained for comparison with prior results.
+
+> **⚠ Downstream propagation (June 2026 plate-swap fix).** The plate-swap correction changed `APOE_WGS` / `APOE.geno_final` / `APOE4_carrier` / `APOE4_count` for ~250 Hispanic samples. **Any analysis built on a pre-June-2026 `preprocessed_data.rds` or `filtered_combined_post_QC.csv` still carries the old (mislabeled) genotypes and must be re-run** against the corrected `Metadata_Merge/output_files_n2851_2026Jun_WGScorrected/` (the `output_files` symlink now points here). This includes the AD-Biomarker-Analysis repo's APOE-stratified work (`APOE_Amyloid_Tau/`, `MCI_Progression_Analysis/`) and any ε4-dosage / ancestry-stratified result. Pre-fix outputs are archived in `output_files_pre_plateswap_2026Jun/`.

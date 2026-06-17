@@ -15,6 +15,10 @@ Primary quality control analyses for Alamar biomarker data. This pipeline proces
 
 Main QC pipeline for Alamar fluid biomarker data.
 
+> **Report filename (auto-stamped):** the YAML `knit:` function names the rendered HTML after the NPQ input dataset — e.g. `QC_Pipeline_Primary_Alamar_NPQ_20251220.html` — so each run's report is unique and doesn't overwrite the previous one. Just Knit normally (RStudio's Knit button honors this); no need to rename the `.Rmd`. Falls back to a date stamp if no NPQ file is in `input_files/`.
+
+> **Robust to Alamar export drift:** the `Sample_QC.csv` header row is **auto-detected** (no hardcoded `skip=`), and the run stops with a clear message if expected columns (`plateID`, `Sample Name`, `QC Status`) are missing. Value-format drift is handled: `IC Median`/`Detectability` are coerced from percent strings (`"95.4%"`) or numerics, `IC Reads`/`Reads` tolerate thousands separators, and `biomarker_detectability.csv` is rescaled to the 0–100 scale the thresholds assume if an export delivers 0–1 proportions. `QC Status` matching is case-insensitive.
+
 **Purpose:** Performs comprehensive quality control including:
 - Sample and biomarker filtering based on read counts and detectability
 - Identification of high-read/high-detectability biomarker subsets
