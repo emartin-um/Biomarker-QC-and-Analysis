@@ -29,6 +29,11 @@ knit: |
 
 <!--
 CHANGELOG — Metadata_Merge_Pipeline.Rmd
+  2026-06-17: mapping_key_Ancestry now ALWAYS written. Previously it was written only when
+   <review_dir>/Ancestry_review.csv existed; runs using the built-in ancestry_config (no review CSV)
+   silently produced no key even though the HTML output-files list (~L1859) always advertises it.
+   Added an else branch that writes the built-in-config mapping (Group × Race × Ethnicity → Ancestry,
+   n_in_batch), parallel to mapping_key_CDX which always writes when dx_config exists.
   2026-06-16 (a): APOE handling + error-report restructure.
    * Step 6d: REMOVED the swap-affected Sanger masking. APOE.geno_final now DEFAULTS TO WGS where
      available (Sanger only when WGS missing); on disagreement WGS wins. No sample-specific plate-swap
@@ -1539,6 +1544,17 @@ if (INCLUDE_DERIVED_COVARS && exists("merged_combined")) {
   if (file.exists(file.path(.review_dir, "Ancestry_review.csv"))) {
     wr(suppressMessages(read_csv(file.path(.review_dir, "Ancestry_review.csv"), show_col_types = FALSE)) %>%
          select(any_of(c("Group","Race","Ethnicity","n_in_batch","FINAL_Ancestry","unexpected_race_eth"))),
+       "mapping_key_Ancestry.csv", combine = FALSE)
+  } else if ("Ancestry" %in% names(merged_combined) ||
+             (exists("ancestry_config") && exists("apply_grouping_config"))) {
+    # No Ancestry_review.csv: write the built-in config's mapping anyway, so the shareable key always
+    # exists (parallel to mapping_key_CDX, which writes whenever dx_config exists). Mirrors the display
+    # branch (~L1106). `Ancestry` is already applied to merged_combined by Step 6d in normal runs;
+    # apply_grouping_config() is a defensive fallback if it isn't.
+    .anc_src <- if ("Ancestry" %in% names(merged_combined)) merged_combined
+                else apply_grouping_config(merged_combined, ancestry_config)
+    wr(.anc_src %>% count(Group, Race, Ethnicity, Ancestry, name = "n_in_batch") %>%
+         arrange(Ancestry, desc(n_in_batch)),
        "mapping_key_Ancestry.csv", combine = FALSE)
   }
 
