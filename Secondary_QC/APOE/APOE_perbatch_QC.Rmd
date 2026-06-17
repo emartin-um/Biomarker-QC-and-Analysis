@@ -1,0 +1,279 @@
+---
+title: "APOE per-batch QC"
+subtitle: "Sanger/WGS concordance · protein-vs-genotype outliers · per-run APOE4 assay screen"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+params:
+  merged_csv: "../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
+  output_dir: "output_files"
+knit: |
+  (function(input, ...) {
+    od  <- tryCatch(rmarkdown::yaml_front_matter(input)$params$output_dir, error = function(e) NULL)
+    if (is.null(od) || !nzchar(od)) od <- "output_files"
+    tag <- sub("^output_files_?", "", basename(od)); if (!nzchar(tag)) tag <- "run"
+    rmarkdown::render(input, output_file = paste0("APOE_perbatch_QC_", tag, ".html"))
+  })
+---
+
+<!--
+Per-batch APOE QC. The routine, batch-agnostic subset extracted (2026-06-16) from the May-2026
+investigation APOE_geno_protein.qmd (archived under _archive_APOE_pre_perbatch_2026Jun16/). Three checks,
+all on one batch's Metadata_Merge output (filtered_combined_post_QC.csv):
+  A. APOE4-protein-vs-genotype outliers   (APOE4 - APOE, genotype-anchored)
+  B. Sanger-vs-WGS genotype concordance   (disagreements are EXPECTED under WGS-default — they flag the
+     plate swap; the sample-specific re-map lives in the affected batch's WGS_Midi_Remap/ folder)
+  C. Per-run APOE4 assay QC screen         (catches Bay1-type APOE4-channel failures)
+Run via the YAML knit() or: rmarkdown::render("APOE_perbatch_QC.Rmd",
+  params = list(merged_csv = "<...>/filtered_combined_post_QC.csv", output_dir = "output_files_<tag>"))
+-->
+
+```{r setup}
+#| include: false
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(ggplot2); library(dplyr); library(writexl); library(knitr)
+OUT <- params$output_dir
+dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
+
+dat <- read.csv(params$merged_csv, check.names = FALSE)
+stopifnot(all(c("SAMPLE_ALIQUOT", "APOE.geno", "APOE4", "APOE") %in% names(dat)))
+
+apoe_levels <- c("22","23","33","24","34","44")
+.clean <- function(x) { y <- gsub("\\s|/", "", trimws(as.character(x))); y[y == ""] <- NA; y }
+dat$APOEgeno         <- factor(.clean(dat$APOE.geno), levels = apoe_levels)
+dat$APOE4_minus_APOE <- dat$APOE4 - dat$APOE
+has_wgs <- "APOE_WGS" %in% names(dat) && any(!is.na(dat$APOE_WGS))
+
+# plate = run-bay (RUN already encodes Bay). Drives the by-plate facet/lollipop figure heights.
+has_run     <- "RUN" %in% names(dat) && any(!is.na(dat$RUN))
+n_plates    <- if (has_run) dplyr::n_distinct(dat$RUN[!is.na(dat$RUN)]) else 0L
+fig_h_facet <- max(4.5, ceiling(max(n_plates, 1) / 4) * 2.3)   # by-plate genotype facets
+fig_h_lolli <- max(3,   n_plates * 0.26 + 1.2)                 # per-plate off-band lollipop
+```
+
+This report runs on **`r basename(params$merged_csv)`** (`r nrow(dat)` samples). APOE genotype policy is
+**WGS-default**: `APOE.geno_final` prefers WGS, Sanger fills missing; Sanger-vs-WGS disagreements are
+reported (Section B) — a cluster of them is the WGS plate-swap signal, corrected by the batch's own
+`WGS_Midi_Remap/` re-map, not here.
+
+# A. APOE4 − APOE protein-vs-genotype outliers
+
+`APOE4 − APOE` should sit in a tight, genotype-specific band (ε4 dosage drives the APOE4 channel).
+Samples far from their genotype's band are candidate genotype/label or assay problems.
+
+```{r outliers}
+#| results: asis
+#| fig-width: 8
+#| fig-height: 5
+plotdat <- dat %>% filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE))
+
+bounds <- plotdat %>% group_by(APOEgeno) %>%
+  summarise(Q1 = quantile(APOE4_minus_APOE, .25), Q3 = quantile(APOE4_minus_APOE, .75),
+            IQR = Q3 - Q1, lower = Q1 - 3*IQR, upper = Q3 + 3*IQR, .groups = "drop")
+medians <- plotdat %>% group_by(APOEgeno) %>%
+  summarise(genotype_median = median(APOE4_minus_APOE), .groups = "drop")
+
+outliers <- plotdat %>% left_join(bounds, by = "APOEgeno") %>%
+  filter(APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
+ranked <- plotdat %>% left_join(medians, by = "APOEgeno") %>%
+  mutate(deviation = APOE4_minus_APOE - genotype_median, abs_deviation = abs(deviation)) %>%
+  arrange(desc(abs_deviation))
+
+cat(sprintf("- Genotyped samples with an APOE4 − APOE value: **%d**\n", nrow(plotdat)))
+cat(sprintf("- Extreme outliers (beyond 3×IQR of their genotype band): **%d**\n\n", nrow(outliers)))
+if (nrow(outliers)) print(kable(as.data.frame(table(genotype = outliers$APOEgeno)),
+                                col.names = c("Genotype","n outliers")))
+
+ggplot(plotdat, aes(APOEgeno, APOE4_minus_APOE, fill = APOEgeno)) +
+  geom_violin(scale = "width", alpha = .6, width = .65) +
+  stat_summary(fun = median, geom = "crossbar", width = .35, linewidth = .3, colour = "grey20") +
+  geom_jitter(width = .15, size = 1.3, alpha = .45) +
+  geom_point(data = outliers, aes(APOEgeno, APOE4_minus_APOE), colour = "red", size = 2, inherit.aes = FALSE) +
+  labs(x = "APOE genotype", y = "APOE4 − APOE", title = "APOE4 − APOE by genotype (red = extreme outlier)") +
+  theme_classic(base_size = 13) + theme(legend.position = "none", plot.title = element_text(face = "bold", hjust = .5))
+
+write_xlsx(outliers, file.path(OUT, "APOE4_minus_APOE_extreme_outliers.xlsx"))
+write_xlsx(ranked,   file.path(OUT, "Outliers_Ranked.xlsx"))
+cat(sprintf("\n\nWrote `Outliers_Ranked.xlsx` (%d) and `APOE4_minus_APOE_extreme_outliers.xlsx` (%d) to `%s/`.\n\n",
+            nrow(ranked), nrow(outliers), OUT))
+```
+
+## Same view, by plate
+
+Each plate (run-bay) faceted, with the **3×IQR cutoff band per genotype** (dashed red) drawn identically
+in every facet — a plate whose points push past the band, or sit shifted, stands out at a glance.
+
+```{r outliers-by-plate, fig.width=10, fig.height=fig_h_facet}
+if (!has_run) {
+  cat("*No `RUN` column — by-plate view skipped.*\n")
+} else {
+  pb <- plotdat %>%
+    left_join(bounds %>% select(APOEgeno, lower, upper), by = "APOEgeno") %>%
+    mutate(outlier = APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
+  ggplot(pb, aes(APOEgeno, APOE4_minus_APOE)) +
+    geom_crossbar(data = bounds, aes(x = APOEgeno, y = (lower + upper)/2, ymin = lower, ymax = upper),
+                  inherit.aes = FALSE, width = .65, fill = NA, colour = "steelblue",
+                  linetype = "dashed", linewidth = .3) +
+    geom_jitter(aes(colour = outlier), width = .15, size = .8, alpha = .6) +
+    scale_colour_manual(values = c(`FALSE` = "grey35", `TRUE` = "red"), guide = "none") +
+    facet_wrap(~ RUN, ncol = 4) +
+    labs(x = "APOE genotype", y = "APOE4 − APOE",
+         title = "APOE4 − APOE by genotype, per plate  (blue dashed = 3×IQR cutoffs; red = outlier)") +
+    theme_bw(base_size = 9) +
+    theme(plot.title = element_text(face = "bold", hjust = .5),
+          panel.grid.minor = element_blank())
+}
+```
+
+# B. Sanger vs WGS genotype concordance
+
+```{r concordance}
+#| results: asis
+if (!has_wgs) {
+  cat("*No `APOE_WGS` calls in this batch — concordance check skipped.*\n\n")
+} else {
+  dat$APOEgeno_WGS <- factor(.clean(dat$APOE_WGS), levels = apoe_levels)
+  conc <- dat %>% filter(!is.na(APOEgeno), !is.na(APOEgeno_WGS)) %>%
+    mutate(orig = .clean(APOE.geno), wgs = .clean(APOE_WGS), concordant = orig == wgs)
+  n_wgs    <- sum(!is.na(dat$APOEgeno_WGS))
+  n_gained <- sum(is.na(dat$APOEgeno) & !is.na(dat$APOEgeno_WGS))
+  cat(sprintf("- Samples with a WGS genotype: **%d** / %d (%.1f%%)\n", n_wgs, nrow(dat), 100*n_wgs/nrow(dat)))
+  cat(sprintf("- Gained a genotype from WGS (Sanger was NA): **%d**\n", n_gained))
+  cat(sprintf("- Concordance where both available: **%.1f%%** (%d/%d)\n", 100*mean(conc$concordant),
+              sum(conc$concordant), nrow(conc)))
+  cat(sprintf("- **Discordant: %d** (expected to cluster if a plate swap is present — see WGS_Midi_Remap/)\n\n",
+              sum(!conc$concordant)))
+  cat("### Cross-tabulation (Sanger rows × WGS cols)\n\n")
+  print(kable(table(Sanger = conc$orig, WGS = conc$wgs)))
+
+  discord <- conc %>% filter(!concordant) %>%
+    select(any_of(c("SAMPLE_ALIQUOT","SAMPLE","RUN","CDX","Group","Race","Ethnicity")),
+           APOE.geno, APOE_WGS, APOE4_minus_APOE) %>% arrange(APOE.geno, APOE_WGS)
+  write_xlsx(discord, file.path(OUT, "APOE_Sanger_vs_WGS_discordant.xlsx"))
+  cat(sprintf("\n### Discordant samples (%d) — written to `APOE_Sanger_vs_WGS_discordant.xlsx`\n\n", nrow(discord)))
+  if (nrow(discord)) print(kable(head(discord, 40), digits = 3))
+}
+```
+
+# C. Per-run APOE4 assay QC screen
+
+Genotype-anchored: for each run-bay, the share of genotyped samples whose APOE4 sits off its ε4-dosage
+band. Catches APOE4-channel failures (e.g. `20251124-1407_Bay1`) that control replicates and sample-level
+auto-QC miss. **A flagged run-bay → drop its APOE4 / APOE4 − APOE (genotypes unaffected; total APOE and
+the other proteins remain usable).**
+
+```{r per-run-apoe4}
+#| results: asis
+OFF_PCT_THRESH  <- 15   # flag if >15% of genotyped samples off-band
+IQR_MULT_THRESH <- 3    # ...or carrier-band APOE4 IQR > 3x the median run-bay
+if (!all(c("APOE4_count","RUN") %in% names(dat)) || sum(!is.na(dat$APOE4_count)) == 0) {
+  cat("*`APOE4_count` / `RUN` not available — per-run APOE4 screen skipped.*\n\n")
+} else {
+  qc <- dat %>% filter(!is.na(APOE4_count), !is.na(APOE4))
+  band_md <- qc %>% group_by(APOE4_count) %>% summarise(md = median(APOE4), .groups = "drop")
+  qc <- qc %>% mutate(off = abs(APOE4 - band_md$md[match(APOE4_count, band_md$APOE4_count)]) > 2)
+  run_qc <- qc %>% group_by(RUN) %>%
+    summarise(n = n(), carriers = sum(APOE4_count >= 1),
+              APOE4_carrier_IQR = round(IQR(APOE4[APOE4_count >= 1], na.rm = TRUE), 2),
+              off_band_pct = round(100*mean(off), 1), .groups = "drop") %>%
+    filter(n >= 15)
+  med_iqr <- median(run_qc$APOE4_carrier_IQR, na.rm = TRUE)
+  run_qc <- run_qc %>%
+    mutate(FLAG = off_band_pct > OFF_PCT_THRESH | APOE4_carrier_IQR > IQR_MULT_THRESH * med_iqr) %>%
+    arrange(desc(off_band_pct))
+
+  cat(sprintf("Screened **%d** run-bays (n ≥ 15 genotyped). Median off-band **%.1f%%**, median carrier-band IQR **%.2f**. Flag: off-band > %d%% **or** carrier IQR > %d× median.\n\n",
+              nrow(run_qc), median(run_qc$off_band_pct), med_iqr, OFF_PCT_THRESH, IQR_MULT_THRESH))
+  flagged <- run_qc %>% filter(FLAG)
+  if (nrow(flagged)) {
+    cat(sprintf("**%d run-bay(s) FLAGGED — treat APOE4 (and APOE4 − APOE) as unreliable there:**\n\n", nrow(flagged)))
+    print(kable(flagged, col.names = c("Run-Bay","n","carriers","APOE4 carrier IQR","off-band %","FLAG")))
+  } else cat("**No run-bays flagged.**\n\n")
+  cat("\nWorst run-bays on the screen:\n\n")
+  print(kable(head(run_qc, 8), col.names = c("Run-Bay","n","carriers","APOE4 carrier IQR","off-band %","FLAG")))
+  write_xlsx(run_qc, file.path(OUT, "APOE4_per_run_QC.xlsx"))
+  cat(sprintf("\n\nWrote `APOE4_per_run_QC.xlsx` (%d run-bays) to `%s/`.\n\n", nrow(run_qc), OUT))
+}
+```
+
+```{r per-run-apoe4-plot, fig.width=8, fig.height=fig_h_lolli}
+if (exists("run_qc")) {
+  ggplot(run_qc, aes(x = reorder(RUN, off_band_pct), y = off_band_pct, colour = FLAG)) +
+    geom_segment(aes(xend = RUN, yend = 0), linewidth = .4) +
+    geom_point(size = 2.2) +
+    geom_hline(yintercept = OFF_PCT_THRESH, linetype = "dashed", colour = "red") +
+    coord_flip() +
+    scale_colour_manual(values = c(`FALSE` = "grey45", `TRUE` = "red"), guide = "none") +
+    labs(x = NULL, y = "off-band % of genotyped samples",
+         title = sprintf("Per-plate APOE4 off-band %%  (dashed = %d%% flag cutoff; red = flagged)", OFF_PCT_THRESH)) +
+    theme_bw(base_size = 10) + theme(plot.title = element_text(face = "bold", hjust = .5),
+                                     panel.grid.minor = element_blank())
+}
+```
+
+# D. Adjacent-accession reciprocal swap candidates
+
+Two samples with **nearby accession numbers in the same run-bay** whose APOE4 readings **reciprocally
+cross** (each looks like the other's ε4 dosage) and where **swapping fixes both** are candidate
+neighbour-tube swaps (accessioning / layout slips). This is a standing version of the ALZ123
+side-investigation (`investigate_outlier_swaps.R`). Confirm a candidate by checking source-rack
+positions and re-genotyping / re-assaying APOE4 — prioritise pairs whose genotypes are Sanger==WGS confirmed.
+
+```{r swap-detector, results='asis'}
+SWAP_GAP <- 5   # accession gap to call two samples "neighbours"
+if (!all(c("APOE4_count","RUN","SAMPLE") %in% names(dat)) || sum(!is.na(dat$APOE4_count)) == 0) {
+  cat("*APOE4_count / RUN / SAMPLE not available - swap scan skipped.*\n\n")
+} else {
+  ng <- function(g){ g <- gsub("[/ ]","",trimws(as.character(g))); ifelse(g==""|is.na(g)|nchar(g)!=2, NA, g) }
+  sw <- dat
+  sw$snum <- suppressWarnings(as.numeric(sw$SAMPLE))
+  sw$gs <- ng(sw$APOE.geno); sw$gw <- if ("APOE_WGS" %in% names(sw)) ng(sw$APOE_WGS) else NA
+  flagged_runs <- if (exists("run_qc")) run_qc$RUN[run_qc$FLAG] else character(0)
+  # ε4-dosage bands from a clean reference (exclude bays the per-run screen flagged)
+  refb <- sw[!is.na(sw$APOE4_count) & !is.na(sw$APOE4_minus_APOE) & !(sw$RUN %in% flagged_runs), ]
+  bb <- refb %>% group_by(APOE4_count) %>%
+    summarise(lo = quantile(APOE4_minus_APOE,.25) - 3*IQR(APOE4_minus_APOE),
+              hi = quantile(APOE4_minus_APOE,.75) + 3*IQR(APOE4_minus_APOE),
+              md = median(APOE4_minus_APOE), .groups = "drop")
+  LO<-setNames(bb$lo,bb$APOE4_count); HI<-setNames(bb$hi,bb$APOE4_count); MD<-setNames(bb$md,bb$APOE4_count)
+  inb  <- function(v,e) !is.na(v) & !is.na(e) & v >= LO[as.character(e)] & v <= HI[as.character(e)]
+  sw$impl <- vapply(sw$APOE4_minus_APOE, function(v) if (is.na(v)) NA_integer_ else
+                    as.integer(names(MD)[which.min(abs(v - MD))]), integer(1))
+  cand <- sw[!is.na(sw$snum) & !is.na(sw$APOE4_count) & !is.na(sw$impl) & !is.na(sw$APOE4_minus_APOE), ]
+  res <- list()
+  for (r in unique(cand$RUN)) {
+    s <- cand[cand$RUN == r, ]; s <- s[order(s$snum), ]; if (nrow(s) < 2) next
+    for (i in 1:(nrow(s)-1)) for (j in (i+1):nrow(s)) {
+      if (s$snum[j] - s$snum[i] > SWAP_GAP) next
+      if (s$APOE4_count[i] != s$APOE4_count[j] &&
+          s$impl[i] == s$APOE4_count[j] && s$impl[j] == s$APOE4_count[i] &&
+          inb(s$APOE4_minus_APOE[j], s$APOE4_count[i]) && inb(s$APOE4_minus_APOE[i], s$APOE4_count[j])) {
+        res[[length(res)+1]] <- data.frame(
+          RUN = r, A = s$SAMPLE[i], B = s$SAMPLE[j], acc_gap = s$snum[j] - s$snum[i],
+          Site_A = if ("Site" %in% names(s)) as.character(s$Site[i]) else NA,
+          Site_B = if ("Site" %in% names(s)) as.character(s$Site[j]) else NA,
+          Sanger_A = s$gs[i], WGS_A = s$gw[i], Sanger_B = s$gs[j], WGS_B = s$gw[j],
+          e4_A = s$APOE4_count[i], implies_A = s$impl[i], e4_B = s$APOE4_count[j], implies_B = s$impl[j],
+          geno_confirmed = (!is.na(s$gw[i]) && s$gs[i]==s$gw[i]) && (!is.na(s$gw[j]) && s$gs[j]==s$gw[j]),
+          in_flagged_bay = r %in% flagged_runs, stringsAsFactors = FALSE)
+      }
+    }
+  }
+  swaps <- if (length(res)) do.call(rbind, res) else data.frame()
+  if (nrow(swaps)) {
+    swaps <- swaps[order(swaps$in_flagged_bay, swaps$acc_gap), ]
+    cat(sprintf("**%d candidate swap pair(s)** — same run-bay, accession gap <= %d, reciprocal e4 cross, swapping fixes both.\n\n",
+                nrow(swaps), SWAP_GAP))
+    print(knitr::kable(swaps, row.names = FALSE))
+    cat("\n\n*`geno_confirmed = TRUE`: Sanger and WGS agree for both samples, so the genotype is certain and it is the",
+        "sample/protein that crossed. `in_flagged_bay = TRUE`: the pair sits in a bay already flagged by the per-run",
+        "APOE4 screen (Section C) — interpret as part of that bay's scramble, not an isolated swap.*\n\n")
+    writexl::write_xlsx(swaps, file.path(OUT, "APOE_swap_candidates.xlsx"))
+    cat(sprintf("Wrote `APOE_swap_candidates.xlsx` (%d) to `%s/`.\n\n", nrow(swaps), OUT))
+  } else cat("No adjacent-accession reciprocal swap candidates detected.\n\n")
+}
+```
