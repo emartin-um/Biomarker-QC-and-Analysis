@@ -41,7 +41,7 @@ run_tag <- sub("^QC[_-]?", "", run_name)
 # keep code/docs; never copy data, outputs, caches, rendered HTML, RStudio state, or archives.
 .keep_pat <- "\\.(Rmd|qmd|R|Rproj|md|yml|yaml)$"
 .drop_pat <- paste0("(^|/)(input_files|output_files[^/]*|\\.Rproj\\.user|_cache|.*_files|old|_archive[^/]*|",
-                    "_backup[^/]*)(/|$)")
+                    "_backup[^/]*|example)(/|$)")   # 'example' = synthetic repo demo (e.g. Metadata_Merge/example/), not a real run
 copied <- 0L
 for (m in modules) {
   src <- file.path(REPO, m)
