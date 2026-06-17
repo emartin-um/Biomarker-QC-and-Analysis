@@ -41,6 +41,14 @@ Rplots.pdf
 **/*.xlsx
 **/*.rds
 
+# Figure images (regenerated from scripts; keep the code repo free of generated plots)
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.svg
+**/*.tif
+**/*.tiff
+
 # Old/archived files
 /old/
 
