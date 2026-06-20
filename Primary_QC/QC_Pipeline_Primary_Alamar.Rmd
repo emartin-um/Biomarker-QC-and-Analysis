@@ -75,6 +75,7 @@ Adjustable QC parameters include:
 | `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample if an outlier from the median NPQ for a biomarker|
 | `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample if an outlier from the median for Total Reads|
 | `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
+| `scaffold_mode` | `"rederive"` | QC Biomarker Set selection: `"rederive"` (per-run derive + de-correlate) or `"frozen"` (fixed 21-anchor scaffold + per-plate tripwire). Changes only the sample-triage anchors, not output biomarker content. |
 
 
 ## A.3 Initial Setup 
@@ -98,6 +99,25 @@ read_count_threshold <- 500
 samp_out_thresh <- 1.5
 read_out_thresh <- 4
 FDR_threshold <- 0.01
+
+# QC Biomarker Set (scaffold) selection — how the markers used for SAMPLE triage are chosen.
+#   "rederive" : per-run derivation (current default) — min detectability >= min_detectability_qc on every
+#                plate, mean/median reads > read_count_threshold, then de-correlated (findCorrelation,
+#                corr_thresh). Set size drifts with plate count.
+#   "frozen"   : a fixed, pre-vetted, de-correlated anchor set (stable across batches) + a per-plate
+#                tripwire. Only the triage ANCHORS change; the biomarker CONTENT of the post-QC outputs
+#                is identical to "rederive" (anchors + everything else are reintegrated downstream).
+scaffold_mode <- "rederive"
+
+# Frozen scaffold: 21 markers >=98% detectable on all 50 ALZ123+8-plate+7-plate plates, de-correlated at
+# |r|<=corr_thresh on the combined study samples (APOE excluded: relative-quant + Bay1 anomaly). See
+# QC_Runs/Tests/QC_frozen_scaffold_06_17_26/. Used only when scaffold_mode == "frozen".
+frozen_scaffold <- c("CCL2","CCL22","CCL3","CCL4","CHI3L1","CNTN2","CXCL8","DDC","FLT1","IFNG","IL10",
+                     "IL5","KDR","MSLN","NPY","PDGFRB","PRDX6","SAA1","SFTPD","SMOC1","TIMP3")
+# Per-plate tripwire thresholds (anchor x plate detectability %): an anchor cell in [drop, watch) is a
+# WATCH (kept, flagged); below drop it is a DROP (not used as an anchor on this run, flagged).
+scaffold_watch <- min_detectability_qc   # 98 — the selection bar
+scaffold_drop  <- 90
 ```
 ---
   
@@ -439,33 +459,76 @@ knitr::kable(
 ## C.2 Correlation Filtering
 Create a set of biomarkers with low correlation for the QC Biomarker Set
 
-```{r correlation-filtering, message=FALSE, warning=FALSE, echo=TRUE}
+```{r correlation-filtering, message=FALSE, warning=FALSE, echo=TRUE, results='asis'}
 library(caret)
-
-# Keep only numeric biomarker columns
-num_cols <- sapply(combined_qc, is.numeric)
-samp_num <- combined_qc[, num_cols]
-
-# Compute correlation matrix
-cor_mat <- cor(samp_num, use = "pairwise.complete.obs")
-
-# Identify highly correlated pairs (|r| ≥ 0.4)
-high_cor <- findCorrelation(cor_mat, cutoff = corr_thresh, names = TRUE)
-
-# Independent biomarkers
-independent_biomarkers <- setdiff(colnames(samp_num), high_cor)
-
-# Heatmap of biomarker correlations
 library(pheatmap)
-pheatmap(cor_mat[independent_biomarkers, independent_biomarkers],
-         main = "Heatmap of Independent Biomarkers",
-         fontsize_row = 6, fontsize_col = 6)
 
-# Update QC dataset to independent biomarkers
-combined_qc <- combined_qc %>%
-  select(Run, Bay, all_of(independent_biomarkers))
+# Biomarker pool entering scaffold selection = everything that passed detectability (C.1.1) and raw-count
+# (C.1.2) filtering. Both modes preserve this pool: independent_biomarkers (the triage anchors) and
+# high_cor (added back in E.1) always partition `qc_pool`, so post-QC biomarker CONTENT is mode-invariant.
+qc_pool <- setdiff(colnames(combined_qc), c("Run", "Bay"))
+qc_pool <- qc_pool[sapply(combined_qc[qc_pool], is.numeric)]
 
-write.csv(independent_biomarkers,"output_files/QC_Biomarker_Set.csv")
+if (identical(scaffold_mode, "frozen")) {
+  # ---- Frozen scaffold + per-plate tripwire ----------------------------------------------------------
+  # Anchors = frozen markers that also cleared the standard pool this run (>=98% detect, >500 reads). A
+  # frozen marker below the bar simply can't anchor this batch; the tripwire below surfaces why.
+  anchors  <- intersect(frozen_scaffold, qc_pool)
+  not_pool <- setdiff(frozen_scaffold, anchors)   # frozen markers unavailable as anchors this run
+
+  # Tripwire: scan every (frozen anchor x plate) detectability cell; alert on anything below the bar.
+  pc <- grep("^Plate_", names(detect), value = TRUE)
+  det_anch <- detect[detect$Biomarker %in% frozen_scaffold, , drop = FALSE]
+  Pmat <- as.matrix(det_anch[, pc]); rownames(Pmat) <- det_anch$Biomarker
+  idx  <- which(Pmat < scaffold_watch, arr.ind = TRUE)
+  tripwire <- if (nrow(idx)) {
+    tibble(anchor = rownames(Pmat)[idx[, 1]], plate = pc[idx[, 2]], detectability = round(Pmat[idx], 1)) %>%
+      mutate(status = ifelse(detectability < scaffold_drop, "DROP + alert", "WATCH (keep + alert)")) %>%
+      arrange(detectability)
+  } else tibble(anchor = character(), plate = character(), detectability = numeric(), status = character())
+  write_csv(tripwire, "output_files/scaffold_tripwire.csv")
+
+  independent_biomarkers <- anchors
+  high_cor               <- setdiff(qc_pool, independent_biomarkers)   # added back in E.1 -> content invariant
+
+  combined_qc <- combined_qc %>% select(Run, Bay, all_of(independent_biomarkers))
+  write.csv(independent_biomarkers, "output_files/QC_Biomarker_Set.csv")
+
+  cat(sprintf("**Scaffold mode: FROZEN** — using **%d of %d** frozen anchors for sample triage.\n\n",
+              length(independent_biomarkers), length(frozen_scaffold)))
+  if (length(not_pool))
+    cat(sprintf("> %d frozen marker(s) not available as anchors this run (absent or below the detectability/read bar): %s\n\n",
+                length(not_pool), paste(not_pool, collapse = ", ")))
+  if (nrow(tripwire)) {
+    cat(sprintf("> **TRIPWIRE: %d anchor x plate cell(s) below %g%%** — WATCH = kept & flagged, DROP (<%g%%) = not anchored & flagged:\n\n",
+                nrow(tripwire), scaffold_watch, scaffold_drop))
+    print(knitr::kable(tripwire))
+    cat("\n")
+  } else {
+    cat(sprintf("> Tripwire: every frozen anchor clears %g%% on every plate — no alert. ✓\n\n", scaffold_watch))
+  }
+  # Heatmap of the anchors actually used (confirms they remain de-correlated on this batch)
+  cor_mat <- cor(combined_qc[, independent_biomarkers], use = "pairwise.complete.obs")
+  pheatmap(cor_mat, main = "Heatmap of Frozen Scaffold Anchors", fontsize_row = 6, fontsize_col = 6)
+
+} else {
+  # ---- Re-derive (default): de-correlate the high-detectability / high-count pool --------------------
+  samp_num <- combined_qc[, qc_pool]
+  cor_mat  <- cor(samp_num, use = "pairwise.complete.obs")
+
+  # Identify highly correlated pairs (|r| >= corr_thresh)
+  high_cor <- findCorrelation(cor_mat, cutoff = corr_thresh, names = TRUE)
+
+  # Independent biomarkers
+  independent_biomarkers <- setdiff(colnames(samp_num), high_cor)
+
+  pheatmap(cor_mat[independent_biomarkers, independent_biomarkers],
+           main = "Heatmap of Independent Biomarkers",
+           fontsize_row = 6, fontsize_col = 6)
+
+  combined_qc <- combined_qc %>% select(Run, Bay, all_of(independent_biomarkers))
+  write.csv(independent_biomarkers, "output_files/QC_Biomarker_Set.csv")
+}
 
 ```
 ---
