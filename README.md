@@ -84,15 +84,15 @@ Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-ana
 Open `Secondary_QC/Hemolysis_Check/Hemolysis_Check.Rproj` in RStudio. Data auto-loads from Metadata_Merge output if not in input_files/.
 
 #### Secondary_QC/APOE
-Analysis of APOE biomarker levels (APOE4 − APOE derived metric) stratified by APOE genotype to validate assay performance and identify outliers.
+Per-batch APOE QC validating the APOE assay against genotype.
 
-**Scripts:**
-- `APOE_geno_protein.qmd` - APOE genotype vs biomarker analysis with outlier detection
+**Canonical script:** `APOE_perbatch_QC.Rmd` (params `merged_csv`, `output_dir`) — §A protein-vs-genotype
+outliers (per-plate banding with auto high-spread override → clean reference band, so scrambled plates
+flag), §B Sanger-vs-WGS concordance, §C per-run APOE4 assay screen.
 
-**Key outputs:**
-- Boxplots of APOE4−APOE by genotype
-- Outlier identification (3×IQR threshold)
-- `APOE4_minus_APOE_extreme_outliers_by_genotype.csv`
+**Key outputs:** `APOE4_minus_APOE_extreme_outliers.xlsx`, `Outliers_Ranked.xlsx`, `high_spread_plates.xlsx`,
+`APOE_Sanger_vs_WGS_discordant.xlsx`, `APOE4_per_run_QC.xlsx`. (`APOE_geno_protein.qmd` = archived May-2026
+investigation, not the pipeline.)
 
 #### Secondary_QC/Batch_Effects ⚠️ NEW — NEEDS TESTING
 Assesses Run- and Bay-level technical batch effects using the merged dataset. Written March 2026; not yet run on real data.
