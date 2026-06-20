@@ -75,7 +75,7 @@ Adjustable QC parameters include:
 | `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample if an outlier from the median NPQ for a biomarker|
 | `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample if an outlier from the median for Total Reads|
 | `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
-| `scaffold_mode` | `"rederive"` | QC Biomarker Set selection: `"rederive"` (per-run derive + de-correlate) or `"frozen"` (fixed 21-anchor scaffold + per-plate tripwire). Changes only the sample-triage anchors, not output biomarker content. |
+| `scaffold_mode` | `"frozen"` | QC Biomarker Set selection: `"frozen"` (fixed 21-anchor scaffold + per-plate tripwire) or `"rederive"` (per-run derive + de-correlate). Changes only the sample-triage anchors, not output biomarker content. |
 
 
 ## A.3 Initial Setup 
@@ -101,13 +101,13 @@ read_out_thresh <- 4
 FDR_threshold <- 0.01
 
 # QC Biomarker Set (scaffold) selection — how the markers used for SAMPLE triage are chosen.
-#   "rederive" : per-run derivation (current default) — min detectability >= min_detectability_qc on every
-#                plate, mean/median reads > read_count_threshold, then de-correlated (findCorrelation,
+#   "frozen"   : (default) a fixed, pre-vetted, de-correlated anchor set (stable across batches) + a
+#                per-plate tripwire. Set size is stable regardless of plate count.
+#   "rederive" : per-run derivation (the original behavior) — min detectability >= min_detectability_qc on
+#                every plate, mean/median reads > read_count_threshold, then de-correlated (findCorrelation,
 #                corr_thresh). Set size drifts with plate count.
-#   "frozen"   : a fixed, pre-vetted, de-correlated anchor set (stable across batches) + a per-plate
-#                tripwire. Only the triage ANCHORS change; the biomarker CONTENT of the post-QC outputs
-#                is identical to "rederive" (anchors + everything else are reintegrated downstream).
-scaffold_mode <- "rederive"
+# Either way only the triage ANCHORS change; the biomarker CONTENT of the post-QC outputs is identical.
+scaffold_mode <- "frozen"
 
 # Frozen scaffold: 21 markers >=98% detectable on all 50 ALZ123+8-plate+7-plate plates, de-correlated at
 # |r|<=corr_thresh on the combined study samples (APOE excluded: relative-quant + Bay1 anomaly). See
