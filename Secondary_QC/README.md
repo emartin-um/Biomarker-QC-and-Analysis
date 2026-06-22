@@ -29,15 +29,19 @@ Analysis of hemolysis markers (HBA1, PGK1, MDH1, SOD1, ENO2) to identify pre-ana
 - Outlier detection flags
 
 ### APOE/
-Analysis of APOE biomarker levels (APOE4 − APOE derived metric) stratified by APOE genotype to validate assay performance and identify samples with discordant biomarker/genotype results.
+Per-batch APOE QC: validates the APOE assay against genotype and surfaces discordances.
 
-**Scripts:**
-- `APOE_geno_protein.qmd` - APOE genotype vs biomarker analysis
+**Canonical script:** `APOE_perbatch_QC.Rmd` (params `merged_csv`, `output_dir`). Three sections:
+- **A — APOE4−APOE protein-vs-genotype outliers.** Per run-bay × genotype 3×IQR banding with an **auto
+  high-spread override** (2026-06-20): a plate whose within-genotype IQR ≫ the typical plate's is re-scored
+  against a **clean reference band** (from normal-spread plates) so a scrambled plate's off-band samples are
+  flagged, not hidden; normal-plate band widths are floored at the clean reference so tight clusters don't
+  over-flag. → `APOE4_minus_APOE_extreme_outliers.xlsx`, `Outliers_Ranked.xlsx`, `high_spread_plates.xlsx`.
+- **B — Sanger-vs-WGS concordance** (WGS-default; disagreements reported). → `APOE_Sanger_vs_WGS_discordant.xlsx`.
+- **C — per-run APOE4 assay screen** (off-band % per run-bay; flags Bay1-type failures). → `APOE4_per_run_QC.xlsx`.
 
-**Key outputs:**
-- Boxplots of APOE4−APOE by genotype
-- Extreme outliers by genotype (3×IQR threshold)
-- `APOE4_minus_APOE_extreme_outliers_by_genotype.csv`
+`APOE_geno_protein.qmd` is the **archived** May-2026 investigation record (`_archive_APOE_pre_perbatch_2026Jun16/`),
+not the current pipeline. See `README.Rmd` for full details.
 
 ### Batch_Effects/ ⚠️ NEW — NEEDS TESTING
 Assesses Run- and Bay-level technical batch effects in the merged dataset. Quantifies

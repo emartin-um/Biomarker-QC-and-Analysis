@@ -13,6 +13,39 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Secondary QC examining the relationship between APOE genotype and APOE/APOE4 protein levels. Flags samples whose protein signal is inconsistent with their genotype (extreme outliers by genotype group), and compares WGS-derived genotypes against the original array/clinical genotypes.
 
+## Current state (2026-06-18) — read this first
+
+- **Canonical module: `APOE_perbatch_QC.Rmd`** (routine per-batch QC), three sections — **A** APOE4−APOE
+  protein-vs-genotype outliers, **B** Sanger-vs-WGS concordance, **C** per-run APOE4 assay screen. The
+  `APOE_geno_protein.qmd` described further down is the **archived May-2026 investigation record**
+  (`_archive_APOE_pre_perbatch_2026Jun16/`), not the current pipeline.
+- **§A banding — per-plate with auto high-spread override (reworked 2026-06-20):**
+  - Each run-bay × genotype is banded vs. itself (plates legitimately drift; this is QC, not
+    genotype-calling). BUT a plate whose within-genotype IQR is `> SPREAD_FACTOR` (3×) the *typical*
+    (median) plate's IQR is flagged **high-spread/problematic** and re-scored against a **clean reference
+    band** (3×IQR from the normal-spread plates only) instead of self-banding — so a scrambled plate's
+    off-band samples are flagged HERE (e.g. `20251124-1407_Bay1` → **19**), not hidden.
+  - Normal plates keep their own band with the width **floored** at the clean reference, so a tight cluster
+    can't make a sliver band and over-flag (`20260513-1625_Bay1` tight-33 cluster → 0).
+  - The high-spread (plate × genotype) list is written to **`high_spread_plates.xlsx`** and cross-checks §C.
+  - *(Earlier versions self-banded and deferred wholly to §C; the by-plate clean-band analysis that lived in
+    `side_investigation_2026Jun/` is now built in.)* Plot hygiene: one jittered point layer (no double-drawn
+    red overlay), count-scaled violins, clean band overlaid so every red point is visibly outside its band.
+
+  (A cross-batch *frozen* reference was tried and rejected — `APOE4−APOE` isn't comparable batch-to-batch,
+  the 8-plate carriers run ~+1 log2 vs ALZ123 and it over-flags; `make_reference_apoe4_bands.R` +
+  `params$ref_bands` survive only as a manual §A override for a single scrambled plate with no clean bay.)
+- **WGS genotype policy is now WGS-DEFAULT (2026-06-16):** `APOE.geno_final = coalesce(APOE_WGS, APOE.geno)`
+  (WGS wins on disagreement; Sanger fills missing; disagreements are *reported*, not masked). This
+  **supersedes** the "masks ~282 affected to Sanger" note below. The sample-specific WGS re-map stays in the
+  affected batch's `WGS_Midi_Remap/`, pending USUHS confirmation.
+- **`20251124-1407_Bay1` APOE4 anomaly** — full side-investigation at
+  `QC_Runs/QC_ALZ123_repro_2026Jun/Secondary_QC/APOE/side_investigation_2026Jun/` (lab summary
+  `APOE4_biomarker_summary_2026Jun18.md`, details `APOE_biomarker_REVISIT_2026Jun18.md`). Current read:
+  likely a **large whole-sample handling scramble of ~⅔ of that bay** (two independent anchors — APOE4
+  permutation floor and a protein-based sex model — converge), pending CHIT1/GDF15 + re-assay; hold APOE4
+  for the bay.
+
 > **Update (2026-06-15) — WGS plate-swap: investigation ongoing, NO correction applied.** The large Sanger-vs-WGS discordance this document investigated (137 samples) was traced to a **WGS sample mix-up** on the AD-Hispanic plate set. ⚠️ The original **2026-06-08 geometric relabel** (`apply_wgs_plate_swap_correction.R`, which produced `..._plateswapcorrected_2026Jun.csv` and the "discordance now 12" result) was later **REFUTED and reverted** — it used the wrong (2026-06-06) idmap and the wrong direction. The current understanding (2026-06-11, chr1 genotype concordance): the **WGS is the mislabeled platform** via a MIDI re-array swap; the canonical pipeline now **masks the ~282 swap-affected AD-Hispanic samples to Sanger** (Metadata_Merge Step 6d, via `WGS_chr1_corrected_idmap_2026Jun11.csv`) — it does **not** relabel. A standalone re-map (`QC_Runs/QC_ALZ123_repro_2026Jun/WGS_Midi_Remap/remap_wgs_midi_plateswap.R`, WGS-vs-Sanger agreement 47%→99.6%) exists as a **PROPOSAL pending USUHS confirmation** — not yet applied. **For the affected AD-Hispanic samples, prefer Sanger (`APOE.geno`); do not rely on the WGS-corrected `APOE.geno_final` there.** See `../../../May_2026_WGS_QC/WGS_Plate_Swap_Summary_2026Jun11.md`. The separate `20251124-1407_Bay1` biomarker assay anomaly is unrelated and still stands.
 
 ## Script

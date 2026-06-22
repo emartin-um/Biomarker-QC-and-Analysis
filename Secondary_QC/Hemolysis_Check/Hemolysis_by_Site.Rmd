@@ -57,7 +57,12 @@ cat("Available hemolysis markers:", paste(hemolysis_available, collapse=", "), "
 # Updated 2026-05-05 for v4 data — added metatada_source, newsamp, CDX_collapsed,
 # Ancestry, APOE_WGS_norm, APOE_WGS_changed, APOE.geno_final, APOE4_carrier,
 # APOE4_count, APOE_WGS, APOE4 (NULISA), E4_dose, European_anc_pct.
-metadata_cols <- c("metatada_source", "RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID",
+# Updated 2026-06-21 — fixed "metatada_source" typo (real col is "metadata_source")
+# and added ResultQC, ID2, is_repeat_subject, is_most_recent (non-numeric QC/ID cols
+# that otherwise fall into biomarker_cols and crash lm()).
+metadata_cols <- c("metadata_source", "ResultQC", "ID2",
+                   "is_repeat_subject", "is_most_recent",
+                   "RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID",
                    "newsample", "newsamp",
                    "Group", "Ethnicity", "Race", "sex", "age_at_subject",
                    "CDX", "CDX_collapsed", "Case_Control", "AOO", "Years_Onset",
@@ -69,6 +74,13 @@ metadata_cols <- c("metatada_source", "RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record
 
 # Get all biomarker columns (everything not in metadata)
 biomarker_cols <- setdiff(names(df), metadata_cols)
+# Guard: biomarkers must be numeric. Drops any stray non-numeric column that isn't
+# in metadata_cols (e.g. character QC/ID flags) — modelling such a column as an lm()
+# response throws "NA/NaN/Inf in 'y'". Robust to future schema additions.
+non_numeric_dropped <- biomarker_cols[!vapply(df[biomarker_cols], is.numeric, logical(1))]
+biomarker_cols <- biomarker_cols[vapply(df[biomarker_cols], is.numeric, logical(1))]
+if (length(non_numeric_dropped))
+  cat("Dropped non-numeric (non-biomarker) columns:", paste(non_numeric_dropped, collapse = ", "), "\n")
 cat("\nTotal biomarkers:", length(biomarker_cols), "\n")
 
 # Helper function

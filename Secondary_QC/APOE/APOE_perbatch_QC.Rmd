@@ -11,6 +11,7 @@ output:
 params:
   merged_csv: "../../Metadata_Merge/output_files/filtered/filtered_combined_post_QC.csv"
   output_dir: "output_files"
+  ref_bands: ""   # optional manual band override (Section A) for the no-clean-bay edge case; default "" = self-contained two-pass
 knit: |
   (function(input, ...) {
     od  <- tryCatch(rmarkdown::yaml_front_matter(input)$params$output_dir, error = function(e) NULL)
@@ -64,6 +65,13 @@ reported (Section B) — a cluster of them is the WGS plate-swap signal, correct
 
 `APOE4 − APOE` should sit in a tight, genotype-specific band (ε4 dosage drives the APOE4 channel).
 Samples far from their genotype's band are candidate genotype/label or assay problems.
+Bands are **per-plate** (each run-bay vs. itself): plates legitimately drift a little, and this is QC —
+not genotype-calling — so we absorb that and flag only **big within-plate** deviations. **Important:** a
+broadly-shifted or scrambled plate **self-bands** (its inflated within-genotype spread swallows its own
+outliers), so it shows **few** outliers *here* — such a plate is caught instead by the cross-plate
+**per-run screen (Section C)** and is fully characterised in the **follow-up investigation** (which bands
+against the CLEAN plates). The faceted view below overlays a **pooled reference band** so a shifted plate
+is still visible at a glance.
 
 ```{r outliers}
 #| results: asis
@@ -71,29 +79,94 @@ Samples far from their genotype's band are candidate genotype/label or assay pro
 #| fig-height: 5
 plotdat <- dat %>% filter(!is.na(APOEgeno), !is.na(APOE4_minus_APOE))
 
-bounds <- plotdat %>% group_by(APOEgeno) %>%
-  summarise(Q1 = quantile(APOE4_minus_APOE, .25), Q3 = quantile(APOE4_minus_APOE, .75),
-            IQR = Q3 - Q1, lower = Q1 - 3*IQR, upper = Q3 + 3*IQR, .groups = "drop")
-medians <- plotdat %>% group_by(APOEgeno) %>%
-  summarise(genotype_median = median(APOE4_minus_APOE), .groups = "drop")
+# BANDING (each run-bay x genotype). Catch an individual off-band sample while (a) NOT over-flagging a
+# tight cluster and (b) NOT being fooled by a SCRAMBLED plate that self-bands. Strategy:
+#  - a plate whose within-genotype IQR is >> the typical plate's IQR is HIGH-SPREAD / problematic (e.g.
+#    the Bay1 APOE4 scramble: its 33-band runs ~13x normal width);
+#  - the per-genotype CLEAN reference band is built from the NORMAL-spread plates only (the scramble's
+#    wild values don't inflate the reference);
+#  - a normal plate uses its OWN band but with the width FLOORED at the clean reference (a tight cluster
+#    can't make a sliver band); a high-spread or tiny-n plate uses the CLEAN reference band directly, so
+#    its scattered points are flagged against the normal expectation.
+MIN_N_BAND    <- 8   # min run x genotype n to trust a plate's own spread
+SPREAD_FACTOR <- 3   # plate IQR > SPREAD_FACTOR x typical (median) plate IQR  =>  high-spread / problematic
 
-outliers <- plotdat %>% left_join(bounds, by = "APOEgeno") %>%
-  filter(APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
-ranked <- plotdat %>% left_join(medians, by = "APOEgeno") %>%
+gkey <- if (has_run) c("RUN", "APOEgeno") else "APOEgeno"
+grp  <- plotdat %>% group_by(across(all_of(gkey))) %>%
+  summarise(n_grp = n(), q1 = quantile(APOE4_minus_APOE,.25), q3 = quantile(APOE4_minus_APOE,.75),
+            med = median(APOE4_minus_APOE), iqr = IQR(APOE4_minus_APOE), .groups = "drop")
+if (has_run) {
+  typ <- grp %>% filter(n_grp >= MIN_N_BAND) %>% group_by(APOEgeno) %>%
+    summarise(typ_iqr = median(iqr), .groups = "drop")
+  grp <- grp %>% left_join(typ, by = "APOEgeno") %>%
+    mutate(high_spread = n_grp >= MIN_N_BAND & !is.na(typ_iqr) & iqr > SPREAD_FACTOR * typ_iqr)
+  clean <- plotdat %>% semi_join(grp %>% filter(n_grp >= MIN_N_BAND, !high_spread), by = gkey) %>%
+    group_by(APOEgeno) %>%
+    summarise(c_lo = quantile(APOE4_minus_APOE,.25) - 3*IQR(APOE4_minus_APOE),
+              c_hi = quantile(APOE4_minus_APOE,.75) + 3*IQR(APOE4_minus_APOE),
+              c_med = median(APOE4_minus_APOE), .groups = "drop")
+} else { grp <- grp %>% mutate(typ_iqr = NA_real_, high_spread = FALSE); clean <- tibble(APOEgeno = factor()) }
+
+# pooled per-genotype band = fallback when a genotype has no clean plate
+ref_pool <- plotdat %>% group_by(APOEgeno) %>%
+  summarise(p_lo = quantile(APOE4_minus_APOE,.25) - 3*IQR(APOE4_minus_APOE),
+            p_hi = quantile(APOE4_minus_APOE,.75) + 3*IQR(APOE4_minus_APOE),
+            p_med = median(APOE4_minus_APOE), .groups = "drop")
+# the per-genotype reference band actually used (clean where available, else pooled) — also the plot overlay
+ref_band <- ref_pool %>% left_join(clean, by = "APOEgeno") %>%
+  transmute(APOEgeno, lower = coalesce(c_lo, p_lo), upper = coalesce(c_hi, p_hi),
+            genotype_median = coalesce(c_med, p_med))
+
+bounds <- grp %>% left_join(ref_band, by = "APOEgeno") %>%
+  rename(ref_lo = lower, ref_hi = upper, ref_med = genotype_median) %>%
+  mutate(ref_half = (ref_hi - ref_lo) / 2,
+         use_plate = n_grp >= MIN_N_BAND & !high_spread,
+         lower = if_else(use_plate, pmin(q1 - 3*iqr, ref_med - ref_half), ref_lo),  # own band, width floored
+         upper = if_else(use_plate, pmax(q3 + 3*iqr, ref_med + ref_half), ref_hi),
+         genotype_median = if_else(use_plate, med, ref_med)) %>%
+  select(all_of(gkey), n_grp, high_spread, lower, upper, genotype_median)
+
+outliers <- plotdat %>% left_join(bounds, by = gkey) %>%
+  filter(!is.na(lower) & (APOE4_minus_APOE < lower | APOE4_minus_APOE > upper))
+ranked <- plotdat %>% left_join(bounds %>% select(all_of(gkey), genotype_median), by = gkey) %>%
   mutate(deviation = APOE4_minus_APOE - genotype_median, abs_deviation = abs(deviation)) %>%
   arrange(desc(abs_deviation))
 
+# high-spread (problematic) plates — cross-checks the Section C screen
+high_spread_plates <- if (has_run) grp %>% filter(high_spread) %>%
+    transmute(RUN, genotype = APOEgeno, n = n_grp, plate_IQR = round(iqr,1),
+              typical_IQR = round(typ_iqr,1), ratio = round(iqr/typ_iqr,1)) %>% arrange(desc(ratio)) else grp[0,]
+if (has_run && nrow(high_spread_plates)) write_xlsx(high_spread_plates, file.path(OUT, "high_spread_plates.xlsx"))
+cat(if (has_run)
+  sprintf("Outlier bands are **per-plate** (each run-bay vs. itself; QC, not genotype-calling), but a plate whose within-genotype spread is >%d× the typical plate is treated as **high-spread/problematic** and is scored against a **clean reference band** (built from normal-spread plates) instead of self-banding — so a scrambled plate's off-band samples are flagged here, not hidden. Normal plates keep their own band with the width floored at the clean reference (tight clusters can't over-flag).\n\n", SPREAD_FACTOR)
+  else "Per-genotype bands (single batch — no `RUN` column).\n\n")
+
 cat(sprintf("- Genotyped samples with an APOE4 − APOE value: **%d**\n", nrow(plotdat)))
-cat(sprintf("- Extreme outliers (beyond 3×IQR of their genotype band): **%d**\n\n", nrow(outliers)))
+cat(sprintf("- Extreme outliers (outside their assigned 3×IQR band): **%d**\n", nrow(outliers)))
+if (has_run) cat(sprintf("- High-spread / problematic (run-bay × genotype) bands re-scored against the clean reference: **%d**\n", nrow(high_spread_plates)))
+cat("\n")
 if (nrow(outliers)) print(kable(as.data.frame(table(genotype = outliers$APOEgeno)),
                                 col.names = c("Genotype","n outliers")))
+if (has_run && nrow(high_spread_plates)) {
+  cat("\n**High-spread plates** (within-genotype IQR ≫ typical — scored against the clean band; cross-check vs Section C):\n\n")
+  print(kable(high_spread_plates, col.names = c("Run-Bay","Genotype","n","plate IQR","typical IQR","ratio")))
+  cat("\n")
+}
 
-ggplot(plotdat, aes(APOEgeno, APOE4_minus_APOE, fill = APOEgeno)) +
-  geom_violin(scale = "width", alpha = .6, width = .65) +
-  stat_summary(fun = median, geom = "crossbar", width = .35, linewidth = .3, colour = "grey20") +
-  geom_jitter(width = .15, size = 1.3, alpha = .45) +
-  geom_point(data = outliers, aes(APOEgeno, APOE4_minus_APOE), colour = "red", size = 2, inherit.aes = FALSE) +
-  labs(x = "APOE genotype", y = "APOE4 − APOE", title = "APOE4 − APOE by genotype (red = extreme outlier)") +
+# one jittered point layer (outliers coloured, not redrawn) -> each sample appears exactly ONCE (no
+# doubling); violins scaled by COUNT so rare genotypes stay narrow; clean reference band overlaid.
+pj <- plotdat %>% mutate(.outlier = SAMPLE_ALIQUOT %in% outliers$SAMPLE_ALIQUOT) %>% arrange(.outlier)
+ggplot(pj, aes(APOEgeno, APOE4_minus_APOE)) +
+  geom_violin(aes(fill = APOEgeno), scale = "count", alpha = .4, width = .9, colour = NA) +
+  geom_crossbar(data = ref_band, aes(x = APOEgeno, y = genotype_median, ymin = lower, ymax = upper),
+                inherit.aes = FALSE, width = .55, fill = NA, colour = "steelblue",
+                linetype = "dashed", linewidth = .35) +
+  geom_point(aes(colour = .outlier, size = .outlier),
+             position = position_jitter(width = .15, height = 0, seed = 42), alpha = .55) +
+  scale_colour_manual(values = c(`FALSE` = "grey45", `TRUE` = "red"), guide = "none") +
+  scale_size_manual(  values = c(`FALSE` = 1.1,     `TRUE` = 2.3),   guide = "none") +
+  labs(x = "APOE genotype", y = "APOE4 − APOE",
+       title = "APOE4 − APOE by genotype (red = extreme outlier; blue dashed = clean reference band)") +
   theme_classic(base_size = 13) + theme(legend.position = "none", plot.title = element_text(face = "bold", hjust = .5))
 
 write_xlsx(outliers, file.path(OUT, "APOE4_minus_APOE_extreme_outliers.xlsx"))
@@ -111,18 +184,20 @@ in every facet — a plate whose points push past the band, or sit shifted, stan
 if (!has_run) {
   cat("*No `RUN` column — by-plate view skipped.*\n")
 } else {
-  pb <- plotdat %>%
-    left_join(bounds %>% select(APOEgeno, lower, upper), by = "APOEgeno") %>%
-    mutate(outlier = APOE4_minus_APOE < lower | APOE4_minus_APOE > upper)
+  pb <- plotdat %>%                          # red = outside its assigned band (matches §A)
+    left_join(bounds, by = gkey) %>%
+    mutate(outlier = !is.na(lower) & (APOE4_minus_APOE < lower | APOE4_minus_APOE > upper))
   ggplot(pb, aes(APOEgeno, APOE4_minus_APOE)) +
-    geom_crossbar(data = bounds, aes(x = APOEgeno, y = (lower + upper)/2, ymin = lower, ymax = upper),
+    # clean reference band (drawn identically in every facet): a scrambled plate's points spill past it
+    # AND are now flagged red (its inflated own-band is overridden by the clean band).
+    geom_crossbar(data = ref_band, aes(x = APOEgeno, y = genotype_median, ymin = lower, ymax = upper),
                   inherit.aes = FALSE, width = .65, fill = NA, colour = "steelblue",
                   linetype = "dashed", linewidth = .3) +
     geom_jitter(aes(colour = outlier), width = .15, size = .8, alpha = .6) +
     scale_colour_manual(values = c(`FALSE` = "grey35", `TRUE` = "red"), guide = "none") +
     facet_wrap(~ RUN, ncol = 4) +
     labs(x = "APOE genotype", y = "APOE4 − APOE",
-         title = "APOE4 − APOE by genotype, per plate  (blue dashed = 3×IQR cutoffs; red = outlier)") +
+         title = "APOE4 − APOE by genotype, per plate  (blue dashed = clean reference band; red = outlier)") +
     theme_bw(base_size = 9) +
     theme(plot.title = element_text(face = "bold", hjust = .5),
           panel.grid.minor = element_blank())

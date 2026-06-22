@@ -382,6 +382,7 @@ In the Rmd's **A.3 Initial Setup** chunk:
 | `samp_out_thresh` | 1.5 | IQR multiplier for sample NPQ outliers |
 | `read_out_thresh` | 4 | IQR multiplier for read outliers |
 | `FDR_threshold` | 0.01 | outlier-burden significance |
+| `scaffold_mode` | `"frozen"` | QC Biomarker Set: `"frozen"` (fixed 21-anchor scaffold + per-plate tripwire — **default since 2026-06-20**) or `"rederive"` (per-run derive + de-correlate). Only the triage anchors change; output biomarker content is identical either way. |
 
 Also set the YAML `title` and the output HTML name for the batch.
 
@@ -396,9 +397,13 @@ the HTML report opens when done, and CSV outputs are written to `output_files/`.
 
 ### 3.4 What the pipeline does (so the report makes sense)
 
-1. Builds a **QC Biomarker Set** — biomarkers with ≥ `min_detectability_qc` (98%) detectability on
-   every plate and pairwise correlation ≤ `corr_thresh`. Relative-quant targets (APOE, CRP) are
-   retained and flagged, not detectability-filtered.
+1. Selects a **QC Biomarker Set** (the markers used to find sample outliers), per `scaffold_mode`:
+   **`"frozen"` (default since 2026-06-20)** uses a fixed, pre-vetted 21-marker de-correlated anchor set
+   (stable regardless of plate count) plus a per-plate tripwire that alerts if an anchor dips below 98%;
+   **`"rederive"`** is the original per-run derivation (≥ `min_detectability_qc` 98% on every plate,
+   pairwise correlation ≤ `corr_thresh`). Either way only the triage anchors change — the biomarker
+   *content* of the post-QC outputs is identical. Relative-quant targets (APOE, CRP) are retained and
+   flagged, not detectability-filtered.
 2. Uses that set to find **sample outliers** via PCA (`PCA_SD`) and outlier burden
    (`FDR_threshold`) → **triage** (removed) and **flagged** (kept but noted).
 3. Reintegrates all biomarkers, splitting **normal** vs **low-detectability / low-count**
