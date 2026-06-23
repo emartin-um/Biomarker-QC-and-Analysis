@@ -1,5 +1,5 @@
 ---
-title: "Replicates Analysis for QC of Biomarker Data for ALZ123"
+title: "Replicates Analysis for QC of Biomarker Data"
 author: "ERM"
 date: "`r Sys.Date()`"
 output: 
@@ -43,7 +43,7 @@ Adjustable QC parameters include:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-cv_threshold = 20
+| cv_threshold | 25 | CV (%) above which a biomarker is flagged at plate / Run / Bay / overall level |
 
 ## A.3 Initial Setup
 
@@ -179,6 +179,22 @@ raw_df <- read_csv("input_files/Raw_counts.csv", show_col_types = FALSE) %>%
   pivot_wider(names_from = Biomarker, values_from = Raw) %>%
   inner_join(meta_df, by = "SampleID") %>%
   relocate(SampleID, Run, Bay)
+
+# --- Internal control (mCherry) ------------------------------------------------
+# The old NAS format carried the mCherry IC as a row in Raw-counts; the new CNS Disease Panel V2
+# export drops that row but keeps the per-sample IC read count in Sample QC as `IC Reads` (verified
+# byte-identical to the legacy mCherry Raw-counts row). Inject it as an `mCherry` column when absent
+# so the IC sections (B.2 IC reps / C.2 IC CV / normalization) work on both formats.
+if (!"mCherry" %in% names(raw_df)) {
+  ic_lookup <- read_csv("input_files/Sample_QC.csv", skip = 12, show_col_types = FALSE) %>%
+    transmute(SampleID = `Sample Name`, mCherry = suppressWarnings(as.numeric(`IC Reads`))) %>%
+    filter(!is.na(SampleID), !is.na(mCherry))
+  if (nrow(ic_lookup) > 0) {
+    raw_df <- raw_df %>% left_join(ic_lookup, by = "SampleID")
+    message(sprintf("Injected mCherry IC from Sample QC 'IC Reads' for %d wells (new-panel format).",
+                    sum(!is.na(raw_df$mCherry))))
+  }
+}
 ```
   
 
@@ -795,13 +811,14 @@ hihg_hi <- res$high_cv$summary %>%
 
 ### C.2.1 CV for mCherry 
 Compute the cv for mCherry for all samples (reps and non-reps) within each plate.
+*(The new CNS Disease Panel V2 export drops the mCherry IC row from Raw-counts, so the IC reads are taken from Sample QC `IC Reads` — verified identical to the legacy mCherry row. Skipped only if neither source is present.)*
 We did already look for IC outliers in the Sample QC, but that did not include the replicates.
 
 This shows a problem with 0804-Bay1 and also 0711-Bay1. The plots show extreme outliers. Our Sample QC already picked these up.
 
 I can try to drop outliers (40% of median) and rerun cv. Are the low reads in 0804-Bay1 really the problem? Also see if any of the reps are outliers (Sample QC did not look at that).
 
-```{r ic_cv, message=FALSE, warning=FALSE, echo=TRUE}
+```{r ic_cv, message=FALSE, warning=FALSE, echo=TRUE, eval = ("mCherry" %in% names(raw_df))}
 
 cv_mCherry_plate <- raw_df %>%
   pivot_longer(
@@ -903,7 +920,7 @@ outlier_table %>%
 #### C.2.2.1 IC Reads in Reps
 IC (mCherry) raw read values for each of the replicate sets.
 
-```{r ic_reps, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE}
+```{r ic_reps, message=FALSE, warning=FALSE, echo=TRUE, eval = ("mCherry" %in% names(raw_df))}
 #For all sets of reads from reps(ipc_samples_reads,nc_samples_reads,sc_samples_reads,hihg_reps_reads) make plots showing all values for the biomarker mCherry for each Run xBay, colored by each type of rep.
 
 library(dplyr)
@@ -957,7 +974,7 @@ mCherry in reps does not track with non-mCherry Biomarkers for 0804 Bay1. For ex
 
 This is not the case with Bay2 which has a consistent pattern in mCherry and other biomarkers across the first 3 runs.
 
-```{r non-ic_reps, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE}
+```{r non-ic_reps, message=FALSE, warning=FALSE, echo=TRUE, eval = ("mCherry" %in% names(raw_df))}
 library(dplyr)
 library(ggplot2)
 
@@ -1037,7 +1054,8 @@ knitr::kable(res_HIHG$medians, digits = 2, caption = "Median Value per Bay × Ru
 
 ## C.3 High CV Biomarkers
 Let's walk through the Alamar normalization process and inspect biomarkers with high CVs.
-I'm not doing this for ALZ123 because there is a separate Rmd that I used to validate Normalization
+(Cross-plate normalization itself is validated separately in the CrossPlate_Normalization project; here we
+just inspect the high-CV replicate biomarkers.)
 
 The starting level of mCherry (the IC) should be the same in each well. Divide each biomarker raw read count for the sample in the well by the read count of mCherry. Below shows this for each of the replicate pairs.
 
@@ -1366,7 +1384,7 @@ plot_and_tables <- function(data,
 
 ### Summary
 
-```{r normalize, message=FALSE, warning=FALSE, echo=TRUE, eval=TRUE, results='asis', fig.width=12, fig.height=10}
+```{r normalize, message=FALSE, warning=FALSE, echo=TRUE, eval = ("mCherry" %in% names(raw_df)), results='asis', fig.width=12, fig.height=10}
 # ==============================================================================
 # C.3 HIGH CV BIOMARKERS - DATA PREPARATION
 # ==============================================================================

@@ -65,8 +65,9 @@ if (!dir.exists("input_files"))  dir.create("input_files")
 if (!dir.exists("output_files")) dir.create("output_files")
 
 # ---- Auto-copy from Metadata_Merge if needed ----
-# Default: merged_combined_post_QC.csv (has separate Run + Bay, all biomarkers)
-# Fallback: merged_standard_post_QC.csv (combined RUN column, standard biomarkers only)
+# Base = merged_combined_post_QC.csv: ALL post-QC samples incl. cross-run replicates (needed for the
+# ICC reproducibility analysis — the cross-sectional filtered file drops them). The DERIVED covariates
+# Ancestry + CDX_collapsed (Step 6d) live in filtered_combined and are joined on below.
 input_candidates <- list.files("input_files",
                                pattern = "(merged_combined|merged_standard)_post_QC\\.csv$",
                                full.names = TRUE)
@@ -82,17 +83,9 @@ if (length(input_candidates) == 0) {
 
   for (d in search_dirs) {
     src <- file.path(d, "merged_combined_post_QC.csv")
-    if (file.exists(src)) {
-      file.copy(src, "input_files/")
-      message("Copied merged_combined from: ", src)
-      break
-    }
+    if (file.exists(src)) { file.copy(src, "input_files/"); message("Copied merged_combined from: ", src); break }
     src <- file.path(d, "merged_standard_post_QC.csv")
-    if (file.exists(src)) {
-      file.copy(src, "input_files/")
-      message("Copied merged_standard from: ", src)
-      break
-    }
+    if (file.exists(src)) { file.copy(src, "input_files/"); message("Copied merged_standard from: ", src); break }
   }
   input_candidates <- list.files("input_files",
                                  pattern = "(merged_combined|merged_standard)_post_QC\\.csv$",
@@ -139,6 +132,30 @@ if ("Run_ID" %in% names(raw) && "Bay" %in% names(raw)) {
   message("Parsed Run_ID and Bay from RUN column.")
 }
 
+# ---- Derived covariates: Ancestry + CDX_collapsed (Metadata_Merge Step 6d) ----
+# merged_combined carries the replicates the ICC needs but only raw Race/CDX; pull the DERIVED
+# covariates from filtered_combined (one row per kept sample) and join by SAMPLE_ALIQUOT. Fall back
+# to raw Race / coalesce(CDX, Case_Control) if filtered_combined is unavailable.
+if (!all(c("Ancestry", "CDX_collapsed") %in% names(df))) {
+  .fc <- list.files("input_files", pattern = "filtered_combined_post_QC\\.csv$", full.names = TRUE)
+  if (!length(.fc)) for (d in list.files("../../Metadata_Merge", pattern = "^output_files", full.names = TRUE)) {
+    .p <- file.path(d, "filtered", "filtered_combined_post_QC.csv")
+    if (file.exists(.p)) { .fc <- .p; break }
+  }
+  if (length(.fc) && file.exists(.fc[1])) {
+    .der <- suppressMessages(readr::read_csv(.fc[1], show_col_types = FALSE)) %>%
+      select(SAMPLE_ALIQUOT, any_of(c("Ancestry", "CDX_collapsed"))) %>% distinct()
+    df <- df %>% left_join(.der, by = "SAMPLE_ALIQUOT")
+    message("Joined derived covariates (Ancestry + CDX_collapsed) from filtered_combined.")
+  }
+}
+if (!"Ancestry" %in% names(df))      df$Ancestry      <- df$Race
+if (!"CDX_collapsed" %in% names(df)) df$CDX_collapsed <- dplyr::coalesce(df$CDX, df$Case_Control)
+
+# ---- Submission year (coarse batch level above Run) ----
+# Each Run belongs to one submission year (2025 ALZ123 vs 2026 8+7-plate); year is the coarsest batch axis.
+df$year <- substr(as.character(df$Run_ID), 1, 4)
+
 # ---- Identify biomarker columns ----
 # All numeric columns after the metadata block
 meta_cols <- c("RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID", "newsample",
@@ -147,6 +164,11 @@ meta_cols <- c("RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID", "newsample",
                "height_inches", "weight_lb", "BMI", "Site",
                "Country/State", "country_of_birth", "metadata_source",
                "newsamp", "Group_Race_Ethnicity", "Run_ID", "Bay", "Run",
+               # derived covariates / flags from Metadata_Merge (filtered_combined) — not biomarkers
+               "Ancestry", "CDX_collapsed", "APOE_WGS", "APOE_WGS_norm", "APOE_WGS_changed",
+               "APOE.geno_final", "APOE4_carrier", "APOE4_count", "gp_APOE",
+               "n_visits", "is_repeat_subject", "subject_visit_n", "is_most_recent",
+               "ID2", "AlamarWarning", "PrimaryQC", "ResultQC",
                "___1", "APOE")
 
 biomarker_cols <- names(df)[!(names(df) %in% meta_cols) & sapply(df, is.numeric)]
@@ -195,37 +217,37 @@ kable(count_tbl, caption = "Sample counts per Run x Bay (study samples only)") %
   kable_styling(full_width = FALSE)
 ```
 
-## C.2 Race Distribution per Run
+## C.2 Ancestry Distribution per Run
 
-```{r composition-race, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
-race_tbl <- df_samples %>%
-  count(Run_ID, Race) %>%
+```{r composition-ancestry, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+anc_tbl <- df_samples %>%
+  count(Run_ID, Ancestry) %>%
   group_by(Run_ID) %>%
   mutate(pct = 100 * n / sum(n)) %>%
   ungroup()
 
-ggplot(race_tbl, aes(x = Run_ID, y = pct, fill = Race)) +
+ggplot(anc_tbl, aes(x = Run_ID, y = pct, fill = Ancestry)) +
   geom_col() +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
-  labs(title = "Race composition per Run",
-       x = "Run", y = "% of samples", fill = "Race")
+  labs(title = "Ancestry composition per Run",
+       x = "Run", y = "% of samples", fill = "Ancestry")
 ```
 
-## C.3 Race Distribution per Bay (across all Runs)
+## C.3 Ancestry Distribution per Bay (across all Runs)
 
-```{r composition-race-bay, message=FALSE, warning=FALSE, fig.width=7, fig.height=4}
-bay_race <- df_samples %>%
-  count(Bay, Race) %>%
+```{r composition-ancestry-bay, message=FALSE, warning=FALSE, fig.width=7, fig.height=4}
+bay_anc <- df_samples %>%
+  count(Bay, Ancestry) %>%
   group_by(Bay) %>%
   mutate(pct = 100 * n / sum(n)) %>%
   ungroup()
 
-ggplot(bay_race, aes(x = Bay, y = pct, fill = Race)) +
+ggplot(bay_anc, aes(x = Bay, y = pct, fill = Ancestry)) +
   geom_col() +
   theme_bw() +
-  labs(title = "Race composition per Bay (pooled across Runs)",
-       x = "Bay", y = "% of samples", fill = "Race")
+  labs(title = "Ancestry composition per Bay (pooled across Runs)",
+       x = "Bay", y = "% of samples", fill = "Ancestry")
 ```
 
 ## C.4 Sex and Age Distribution per Run
@@ -269,21 +291,20 @@ ggplot(site_tbl, aes(x = Run_ID, y = pct, fill = Site)) +
        x = "Run", y = "% of samples", fill = "Site")
 ```
 
-## C.6 Diagnosis Distribution per Run
+## C.6 Diagnosis (CDX_collapsed) Distribution per Run
 
 ```{r composition-dx, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
 dx_tbl <- df_samples %>%
-  mutate(Dx = coalesce(CDX, Case_Control)) %>%
-  count(Run_ID, Dx) %>%
+  count(Run_ID, CDX_collapsed) %>%
   group_by(Run_ID) %>%
   mutate(pct = 100 * n / sum(n)) %>%
   ungroup()
 
-ggplot(dx_tbl, aes(x = Run_ID, y = pct, fill = Dx)) +
+ggplot(dx_tbl, aes(x = Run_ID, y = pct, fill = CDX_collapsed)) +
   geom_col() +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) +
-  labs(title = "Diagnosis composition per Run",
+  labs(title = "Diagnosis (CDX_collapsed) composition per Run",
        x = "Run", y = "% of samples", fill = "Diagnosis")
 ```
 
@@ -309,15 +330,16 @@ eta_sq <- function(group, value) {
 }
 
 cov_list <- list(
-  Race  = df_samples$Race,
-  sex   = df_samples$sex,
-  Site  = df_samples$Site,
-  Dx    = coalesce(df_samples$CDX, df_samples$Case_Control)
+  Ancestry = df_samples$Ancestry,
+  sex      = df_samples$sex,
+  Site     = df_samples$Site,
+  CDX      = df_samples$CDX_collapsed
 )
 
 batch_vars <- list(
   Run_ID = df_samples$Run_ID,
-  Bay    = df_samples$Bay
+  Bay    = df_samples$Bay,
+  year   = df_samples$year
 )
 
 conf_results <- map_dfr(names(batch_vars), function(bv) {
@@ -356,21 +378,21 @@ write_csv(conf_results, "output_files/batch_covariate_confounding.csv")
 # D. Variance Partitioning
 
 Decomposes variance per protein into:
-- Fixed effects: Race, sex, age, Site, Diagnosis
-- Random effects: Run (between-run technical variation), Bay nested in Run (sequential/drift)
+- Random effects (categorical): Ancestry, sex, Site, Diagnosis (CDX_collapsed)
+- Random effects (batch): Run (between-run technical variation), Bay nested in Run (sequential/drift)
+- Fixed effect: age_at_subject (continuous)
 - Residual: unexplained
 
-Model: `~ Race + sex + age_at_subject + Site + Dx + (1|Run_ID) + (1|Run_ID:Bay)`
+Model: `~ age_at_subject + (1|Ancestry) + (1|sex) + (1|Site) + (1|CDX_collapsed) + (1|Run_ID) + (1|Run_ID:Bay)`
 
 Proteins with high Run or Bay variance fractions are candidates for batch correction.
-Proteins where Run variance ~ Race variance indicate confounding that correction cannot resolve.
+Proteins where Run variance ~ Ancestry variance indicate confounding that correction cannot resolve.
 
 ```{r vp-prep, message=FALSE, warning=FALSE}
 # Use unique samples only (no replicates) to avoid inflating residual
 vp_df <- df_unique %>%
-  filter(!is.na(Race), !is.na(sex), !is.na(age_at_subject),
-         !is.na(Run_ID), !is.na(Bay)) %>%
-  mutate(Dx = coalesce(CDX, Case_Control))
+  filter(!is.na(Ancestry), !is.na(sex), !is.na(age_at_subject),
+         !is.na(CDX_collapsed), !is.na(Run_ID), !is.na(Bay))
 
 # Remove Runs with fewer than VP_MIN_SAMPLES
 run_counts <- count(vp_df, Run_ID)
@@ -387,15 +409,15 @@ expr_mat <- vp_df %>%
   t()
 
 info_df <- vp_df %>%
-  select(Run_ID, Bay, Race, sex, age_at_subject, Site, Dx) %>%
-  mutate(across(c(Race, sex, Site, Dx, Run_ID, Bay), as.factor)) %>%
+  select(Run_ID, Bay, Ancestry, sex, age_at_subject, Site, CDX_collapsed) %>%
+  mutate(across(c(Ancestry, sex, Site, CDX_collapsed, Run_ID, Bay), as.factor)) %>%
   as.data.frame()
 ```
 
 ```{r vp-run, message=FALSE, warning=FALSE, fig.width=12, fig.height=6}
 register(MulticoreParam(VP_CORES))
 
-form <- ~ Race + sex + age_at_subject + Site + Dx + (1|Run_ID) + (1|Run_ID:Bay)
+form <- ~ age_at_subject + (1|Ancestry) + (1|sex) + (1|Site) + (1|CDX_collapsed) + (1|Run_ID) + (1|Run_ID:Bay)
 
 vp_fit <- fitExtractVarPartModel(expr_mat, form, info_df)
 
@@ -433,11 +455,19 @@ write_csv(vp_df_out, "output_files/variance_partition_results.csv")
 
 ---
 
-# E. Replicate-Based ICC Analysis
+# E. Replicate-Based Reproducibility
 
-Uses HIHG biological replicates (same sample run on multiple plates) to estimate:
-- **Within-Run ICC**: reproducibility across Bays within the same Run
-- **Cross-Run ICC**: reproducibility across different Runs (total technical variance)
+Two independent replicate structures estimate technical reproducibility.
+
+**E.1 — Biological duplicates** (study samples re-run on another plate). Per protein we compute an ICC
+across the repeated measurements, pooled over duplicated samples (between-sample biological spread is the
+"signal", technical noise the "error"):
+
+- **Cross-Run ICC** — agreement across *different Runs*; total run-to-run technical variance. *Estimable.*
+- **Within-Run ICC** — agreement across *Bays of the same Run*. Requires a sample loaded **≥2× within one
+  Run**; by design the duplicates are spread *across* Runs, so **0 qualify** and this is reported as
+  "Not estimable (no within-Run duplicates)". The within-plate / within-Run level is recovered instead
+  from the **control pools in E.2**.
 
 ICC > 0.9 = excellent; 0.75-0.9 = good; < 0.75 = concerning.
 
@@ -460,6 +490,9 @@ cross_run_reps <- rep_obs %>% filter(any_cross_run)
 cat("Replicated samples:            ", n_distinct(rep_obs$SAMPLE), "\n")
 cat("  with within-Run replicates:  ", n_distinct(within_run_reps$SAMPLE), "\n")
 cat("  with cross-Run replicates:   ", n_distinct(cross_run_reps$SAMPLE), "\n")
+if (n_distinct(within_run_reps$SAMPLE) == 0)
+  cat("  NOTE: no biological sample is repeated within a single Run -> Within-Run ICC is not estimable\n",
+      "       from duplicates (it is recovered from the control pools in E.2).\n", sep = "")
 ```
 
 ```{r icc-calc, message=FALSE, warning=FALSE}
@@ -505,7 +538,7 @@ icc_combined <- icc_within %>%
     Category_within = case_when(
       ICC_within >= 0.9  ~ "Excellent", ICC_within >= 0.75 ~ "Good",
       ICC_within >= 0.5  ~ "Moderate",  !is.na(ICC_within)  ~ "Poor",
-      TRUE ~ "Insufficient data"),
+      TRUE ~ "Not estimable (no within-Run dup)"),
     Category_cross = case_when(
       ICC_cross >= 0.9   ~ "Excellent", ICC_cross >= 0.75  ~ "Good",
       ICC_cross >= 0.5   ~ "Moderate",  !is.na(ICC_cross)   ~ "Poor",
@@ -554,48 +587,112 @@ if (nrow(poor_icc) > 0) {
 write_csv(icc_combined, "output_files/icc_results.csv")
 ```
 
+## E.2 Control-pool reproducibility (within-plate / within-Run / cross-Run)
+
+The Alamar control pools are **identical material repeated on every plate** — HIHG (one pooled reference,
+2 aliquots/plate), SC (3/plate) and IPC (3/plate) — so *all* of their variation is technical. A per-protein
+random-effects decomposition `value ~ (1|Run) + (1|Run:Bay)` splits it into:
+
+- **% Run** — cross-Run drift (the dominant batch axis)
+- **% Bay-in-Run** — bay / sequential drift within a Run
+- **% Well** — residual well-to-well noise on the same plate (within-plate precision)
+
+For identical material a classical ICC is not meaningful (no between-subject signal), so reproducibility is
+reported as variance fractions + SD (log2) + CV. Good = low Run/Bay %, low CV. This is the within-plate /
+within-Run level that the biological duplicates (E.1) cannot give.
+
+```{r e2-control-repro, message=FALSE, warning=FALSE, results='asis'}
+ctrl_files <- list(
+  HIHG = c("../Replicate_Analysis/output_files/hihg_reps_NPQ.csv", "../../Primary_QC/output_files/hihg_reps_NPQ.csv"),
+  SC   = "../Replicate_Analysis/output_files/sc_reps_NPQ.csv",
+  IPC  = "../Replicate_Analysis/output_files/ipc_reps_NPQ.csv")
+read_first <- function(paths) { for (p in paths) if (file.exists(p)) return(suppressMessages(readr::read_csv(p, show_col_types = FALSE))); NULL }
+ctrl_list <- purrr::compact(lapply(ctrl_files, read_first))
+
+repro <- NULL
+if (length(ctrl_list) && all(c("Run","Bay") %in% names(ctrl_list[[1]]))) {
+  bm_ctrl <- Reduce(intersect, lapply(ctrl_list, function(d) { cc <- setdiff(names(d), c("SampleID","Run","Bay"))
+                    cc[sapply(cc, function(x) is.numeric(d[[x]]))] }))
+  bm_ctrl <- setdiff(intersect(bm_ctrl, biomarker_cols), "mCherry")
+
+  vc_one <- function(d, b) {
+    dd <- tibble(y = d[[b]], Run = factor(d$Run), Bay = factor(d$Bay)) %>% filter(is.finite(y))
+    if (dplyr::n_distinct(dd$Run) < 2 || nrow(dd) < 6) return(NULL)
+    fit <- tryCatch(suppressMessages(lme4::lmer(y ~ (1|Run) + (1|Run:Bay), data = dd,
+                    control = lme4::lmerControl(check.conv.singular = "ignore"))), error = function(e) NULL)
+    if (is.null(fit)) return(NULL)
+    v <- as.data.frame(lme4::VarCorr(fit)); gv <- function(g){ x <- v$vcov[v$grp==g]; if (length(x)) x else 0 }
+    vr <- gv("Run"); vb <- gv("Run:Bay"); vw <- gv("Residual"); tot <- vr+vb+vw
+    if (tot <= 0) return(NULL)
+    lin <- 2^dd$y
+    tibble(Biomarker = b, pct_Run = 100*vr/tot, pct_Bay_in_Run = 100*vb/tot, pct_Well = 100*vw/tot,
+           SD_within_plate = sqrt(vw), SD_within_run = sqrt(vb+vw), SD_cross_run = sqrt(tot),
+           CV_pct = 100*sd(lin, na.rm = TRUE)/mean(lin, na.rm = TRUE))
+  }
+  repro <- purrr::map_dfr(names(ctrl_list), function(ct)
+    purrr::map_dfr(bm_ctrl, ~vc_one(ctrl_list[[ct]], .x)) %>% mutate(Control = ct, .before = 1))
+  write_csv(repro, "output_files/control_reproducibility.csv")
+
+  print(repro %>% group_by(Control) %>%
+    summarise(n_biomarkers = n(), `median %Run` = round(median(pct_Run),1),
+              `median %Bay` = round(median(pct_Bay_in_Run),1), `median %Well` = round(median(pct_Well),1),
+              `median SD cross-run (log2)` = round(median(SD_cross_run),2),
+              `median CV%` = round(median(CV_pct),1), .groups = "drop") %>%
+    kable(caption = "Control-pool variance decomposition (identical material; median across biomarkers). Low Run/Bay % and low CV = good.") %>%
+    kable_styling(full_width = FALSE))
+
+  print(repro %>% filter(Control == "HIHG") %>% arrange(desc(pct_Run)) %>% head(15) %>%
+    transmute(Biomarker, `%Run` = round(pct_Run,1), `%Bay` = round(pct_Bay_in_Run,1),
+              `%Well` = round(pct_Well,1), `SD cross-run` = round(SD_cross_run,2), `CV%` = round(CV_pct,1)) %>%
+    kable(caption = "Most run-unstable proteins in the HIHG pool (identical material) — batch-correction priority") %>%
+    kable_styling(full_width = FALSE) %>% scroll_box(width = "100%"))
+} else {
+  cat("Control replicate files not found (Replicate_Analysis/output_files or Primary_QC/output_files); skipping E.2.\n")
+}
+```
+
 ---
 
 # F. Formal Per-Protein Batch Effect Test
 
-Linear model per protein: `NPQ ~ Run_ID + Bay + Race + sex + age_at_subject + Site + Dx`
+Linear model per protein: `NPQ ~ Run_ID + Bay + Ancestry + sex + age_at_subject + Site + CDX_collapsed`
 
-F-test (Type III) for Run_ID and Bay terms after adjusting for biological covariates.
+Run and Bay are tested by **nested-model F-tests** — each batch term as the gain over a model
+containing all biological covariates plus the *other* batch term (`anova(reduced, full)`).
 FDR correction across proteins within each term.
 
-**Limitation:** Treats Run_ID as fixed — low power with many Runs. Interpret alongside variance partitioning.
+**Why not `Anova(type="III")`:** Site is partly nested in Run (some sites appear in a single Run),
+so the full fixed-effect design is rank-deficient and `car::Anova(type="III")` errors on the aliased
+coefficients (this previously NA'd every protein). The nested F-test compares residual sums of squares
+and is immune to rank deficiency. Because Run and Site are confounded, the Run test is *conditional on
+Site* (conservative). **Limitation:** Run_ID is fixed — low power with many Runs. Interpret alongside
+variance partitioning (Section D) and the control-pool variance components (Section E.2).
 
 ```{r formal-test, message=FALSE, warning=FALSE}
 library(car)
 
 test_df <- df_unique %>%
-  filter(!is.na(Race), !is.na(sex), !is.na(age_at_subject),
-         !is.na(Run_ID), !is.na(Bay)) %>%
-  mutate(Dx     = coalesce(CDX, Case_Control),
-         Run_fac = as.factor(Run_ID)) %>%
-  filter(!is.na(Dx))
+  filter(!is.na(Ancestry), !is.na(sex), !is.na(age_at_subject),
+         !is.na(CDX_collapsed), !is.na(Run_ID), !is.na(Bay)) %>%
+  mutate(Run_fac = as.factor(Run_ID))
 
 batch_test_results <- map_dfr(biomarker_cols, function(bm) {
   y  <- test_df[[bm]]
-  ok <- complete.cases(test_df[, c("Race","sex","age_at_subject","Dx")]) & !is.na(y)
+  ok <- complete.cases(test_df[, c("Ancestry","sex","age_at_subject","CDX_collapsed","Site","Bay")]) & !is.na(y)
   if (sum(ok) < 20)
     return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
+  d <- test_df[ok, ]; d$.y <- y[ok]
 
-  fit <- tryCatch(
-    lm(y[ok] ~ Run_fac + Bay + Race + sex + age_at_subject + Site + Dx,
-       data = test_df[ok, ]),
-    error = function(e) NULL)
-  if (is.null(fit)) return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
+  # Nested-model F-tests (robust to the Run/Site rank-deficiency that breaks Anova type III).
+  # Each batch term = its gain over a model with all bio covariates + the OTHER batch term.
+  fit_full  <- tryCatch(lm(.y ~ Run_fac + Bay + Ancestry + sex + age_at_subject + Site + CDX_collapsed, data = d), error = function(e) NULL)
+  fit_noRun <- tryCatch(lm(.y ~           Bay + Ancestry + sex + age_at_subject + Site + CDX_collapsed, data = d), error = function(e) NULL)
+  fit_noBay <- tryCatch(lm(.y ~ Run_fac +       Ancestry + sex + age_at_subject + Site + CDX_collapsed, data = d), error = function(e) NULL)
+  if (is.null(fit_full)) return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
 
-  aov_fit <- tryCatch(Anova(fit, type = "III"), error = function(e) NULL)
-  if (is.null(aov_fit)) return(tibble(Biomarker = bm, p_Run = NA_real_, p_Bay = NA_real_))
-
-  aov_df <- as.data.frame(aov_fit)
-  tibble(
-    Biomarker = bm,
-    p_Run = aov_df["Run_fac", "Pr(>F)"],
-    p_Bay = if ("Bay" %in% rownames(aov_df)) aov_df["Bay", "Pr(>F)"] else NA_real_
-  )
+  p_run <- if (!is.null(fit_noRun)) tryCatch(anova(fit_noRun, fit_full)[["Pr(>F)"]][2], error = function(e) NA_real_) else NA_real_
+  p_bay <- if (!is.null(fit_noBay)) tryCatch(anova(fit_noBay, fit_full)[["Pr(>F)"]][2], error = function(e) NA_real_) else NA_real_
+  tibble(Biomarker = bm, p_Run = p_run, p_Bay = p_bay)
 })
 
 batch_test_results <- batch_test_results %>%
@@ -620,7 +717,251 @@ write_csv(batch_test_results, "output_files/batch_effect_test_results.csv")
 
 ---
 
-# G. Summary and Decision
+# G. Submission-year (2025 vs 2026) batch structure
+
+The 50-plate set spans two submission years — **2025** (ALZ123) and **2026** (8+7-plate). Each Run belongs
+to one year, so the strong Run effects above are partly a **year-level** shift. This section isolates it by
+clustering the **HIHG control** (the *same* sample on every plate — any structure is purely technical) and
+decomposing each protein's variance by year.
+
+```{r year-cluster, message=FALSE, warning=FALSE, fig.width=8, fig.height=5}
+year_pc1_r2 <- NA_real_; n_year_sig <- NA_integer_; plates_split <- NA_real_; year_res <- NULL
+.hihg <- "../../Primary_QC/output_files/hihg_reps_NPQ.csv"
+if (file.exists(.hihg)) {
+  H <- suppressMessages(read_csv(.hihg, show_col_types = FALSE))
+  bc <- intersect(biomarker_cols, names(H))
+  if (!length(bc)) bc <- setdiff(names(H), c("Run","Bay"))[sapply(setdiff(names(H), c("Run","Bay")), function(c) is.numeric(H[[c]]))]
+  H$year <- substr(as.character(H$Run), 1, 4)
+  M <- as.matrix(H[, bc]); M <- M[, apply(M, 2, function(c) sd(c, na.rm = TRUE) > 0)]; M[is.na(M)] <- 0
+  pca <- prcomp(M, scale. = TRUE); ve <- 100 * summary(pca)$importance[2, 1:2]
+  sc  <- data.frame(PC1 = pca$x[,1], PC2 = pca$x[,2], year = H$year)
+  ss  <- summary(aov(PC1 ~ year, sc))[[1]]; year_pc1_r2 <- ss[1,"Sum Sq"] / sum(ss[,"Sum Sq"])
+  print(ggplot(sc, aes(PC1, PC2, color = year)) + geom_point(size = 2, alpha = .8) + stat_ellipse() +
+        theme_bw() + labs(title = "HIHG control PCA by submission year (same sample, every plate)",
+                          subtitle = sprintf("PC1 %.0f%% var; year explains %.0f%% of PC1", ve[1], 100*year_pc1_r2)))
+  ggsave("output_files/hihg_pca_by_year.png", width = 7, height = 5, dpi = 110)
+  H$plate <- paste0(H$Run, "_", H$Bay)
+  pm <- H %>% group_by(plate, year) %>% summarise(across(all_of(colnames(M)), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+  PM <- scale(as.matrix(pm[, colnames(M)])); PM[is.na(PM)] <- 0
+  tabp <- table(cluster = cutree(hclust(dist(PM), "ward.D2"), 2), year = pm$year)
+  plates_split <- sum(apply(tabp, 1, max)) / sum(tabp)
+  cat(sprintf("HIHG PC1 explained by year: %.0f%%  |  2-cluster plate split matches year: %.0f%% of %d plates\n\n",
+              100*year_pc1_r2, 100*plates_split, sum(tabp)))
+  print(knitr::kable(as.data.frame.matrix(tabp), caption = "Per-plate 2-cluster cut vs submission year"))
+}
+```
+
+```{r year-per-protein, message=FALSE, warning=FALSE}
+if (file.exists(.hihg)) {
+  year_res <- purrr::map_dfr(bc, function(b) {
+    x25 <- H[[b]][H$year == "2025"]; x26 <- H[[b]][H$year == "2026"]
+    x25 <- x25[is.finite(x25)]; x26 <- x26[is.finite(x26)]
+    if (length(x25) < 3 || length(x26) < 3) return(NULL)
+    ss <- summary(aov(H[[b]] ~ H$year))[[1]]
+    tt <- suppressWarnings(t.test(x26, x25))
+    tibble(Biomarker = b, pct_var_year = 100 * ss[1,"Sum Sq"] / sum(ss[,"Sum Sq"]),
+           log2_diff_26_25 = unname(diff(rev(tt$estimate))), p = tt$p.value)
+  })
+  year_res$FDR <- p.adjust(year_res$p, "BH"); n_year_sig <- sum(year_res$FDR < 0.05, na.rm = TRUE)
+  write_csv(year_res %>% arrange(desc(pct_var_year)), "output_files/year_effect_per_protein.csv")
+  cat(sprintf("Proteins with a significant 2025-vs-2026 shift in the HIHG control (FDR < 0.05): %d / %d\n\n",
+              n_year_sig, nrow(year_res)))
+  year_res %>% arrange(desc(pct_var_year)) %>% head(12) %>%
+    mutate(across(c(pct_var_year, log2_diff_26_25), ~round(., 2)), FDR = signif(FDR, 2)) %>%
+    kable(caption = "Top proteins by % HIHG variance explained by submission year") %>%
+    kable_styling(full_width = FALSE)
+}
+```
+
+## G.2 Control-pool PCA (HIHG / SC / IPC) — backup batch view
+
+PCA of each control pool (identical material), one point per well, colored by submission year. Any structure
+is purely technical, so clean year separation = batch. Wells that sit off their *own* year-cluster are
+candidate problem plates. Per-well PC1–4 scores are written to `pc_scores_controls.csv`.
+
+```{r g2-control-pca, message=FALSE, warning=FALSE, fig.width=13, fig.height=4.5, results='asis'}
+read_first2 <- function(paths) { for (p in paths) if (file.exists(p)) return(suppressMessages(readr::read_csv(p, show_col_types = FALSE))); NULL }
+ctrl_pca_files <- list(
+  HIHG = c("../Replicate_Analysis/output_files/hihg_reps_NPQ.csv", "../../Primary_QC/output_files/hihg_reps_NPQ.csv"),
+  SC   = "../Replicate_Analysis/output_files/sc_reps_NPQ.csv",
+  IPC  = "../Replicate_Analysis/output_files/ipc_reps_NPQ.csv")
+.cl <- purrr::compact(lapply(ctrl_pca_files, read_first2))
+rz <- function(x) { m <- mad(x); if (m == 0) return(rep(0, length(x))); abs((x - median(x))/(1.4826*m)) }
+ctrl_scores <- NULL
+if (length(.cl) && all(c("Run","Bay") %in% names(.cl[[1]]))) {
+  do_pca <- function(d, label) {
+    d$year <- substr(as.character(d$Run), 1, 4)
+    bmc <- setdiff(names(d), c("SampleID","Run","Bay","year")); bmc <- bmc[sapply(bmc, function(x) is.numeric(d[[x]]))]
+    bmc <- setdiff(bmc, "mCherry")
+    M <- as.matrix(d[, bmc]); M <- M[, apply(M, 2, function(c) sd(c, na.rm = TRUE) > 0), drop = FALSE]; M[is.na(M)] <- 0
+    p <- prcomp(M, scale. = TRUE); ve <- 100*summary(p)$importance[2, 1:4]
+    sc <- as.data.frame(p$x[, 1:4]); names(sc) <- paste0("PC", 1:4)
+    list(out = tibble(Control = label, SampleID = d$SampleID, Run = d$Run, Bay = d$Bay, year = d$year,
+                      plate = paste0(d$Run, "_", d$Bay)) %>% bind_cols(sc), ve = ve)
+  }
+  pl <- lapply(names(.cl), function(ct) do_pca(.cl[[ct]], ct)); names(pl) <- names(.cl)
+  ctrl_scores <- bind_rows(lapply(pl, `[[`, "out")) %>% mutate(across(starts_with("PC"), ~round(.x, 3))) %>%
+    group_by(Control, year) %>% mutate(is_outlier_in_year = rz(PC1) > 4 | rz(PC2) > 4) %>% ungroup() %>%
+    mutate(pos = sub("_[0-9]{8}-.*$", "", SampleID),
+           pos = ifelse(grepl("^(SC|IPC|NC)_[0-9]", pos), pos, Control))   # SC_1/2/3, IPC_1/2/3; HIHG is one pool
+  FLAGGED_RUNS <- ctrl_scores %>% filter(Control == "HIHG", is_outlier_in_year) %>% distinct(Run) %>% pull(Run)
+  ctrl_scores <- ctrl_scores %>% mutate(flag = ifelse(Run %in% FLAGGED_RUNS, Run, "other plates"))
+  write_csv(ctrl_scores, "output_files/pc_scores_controls.csv")
+
+  yr_cols <- c("2025" = "#1b9e77", "2026" = "#d95f02")
+  plots <- lapply(names(pl), function(ct) {
+    d <- pl[[ct]]$out; ve <- pl[[ct]]$ve
+    ggplot(d, aes(PC1, PC2, color = year)) + geom_point(size = 1.8, alpha = .85) +
+      stat_ellipse(aes(group = year), linewidth = .4) + scale_color_manual(values = yr_cols) + theme_bw() +
+      labs(title = paste0(ct, " pool"), subtitle = sprintf("PC1 %.0f%% / PC2 %.0f%%", ve[1], ve[2]), x = "PC1", y = "PC2", color = "Year")
+  })
+  .gctrl <- patchwork::wrap_plots(plots, nrow = 1) + patchwork::plot_annotation(
+    title = "Control-pool PCA by submission year — identical material, so all separation is technical/batch")
+  ggsave("output_files/pca_controls_by_year.png", .gctrl, width = 13, height = 4.5, dpi = 120)
+  print(.gctrl)
+
+  print(ctrl_scores %>% filter(is_outlier_in_year) %>% distinct(Control, plate, year) %>% arrange(Control, plate) %>%
+    kable(caption = "Control wells off their own year-cluster (candidate problem plates)") %>% kable_styling(full_width = FALSE))
+} else {
+  cat("Control replicate files not found; skipping G.2.\n")
+}
+```
+
+Same control PCAs **colored multiple ways** — by year (batch), by Bay, and by position (SC_1/2/3,
+IPC_1/2/3) or, for the single-pool HIHG, by flagged plate. IPC clusters by *position* with no year
+separation (the stable normalization anchor); HIHG/SC separate by year (batch).
+
+**Reminder — the three IPC clusters are three distinct control pool *mixes* (IPC_1/2/3), one per plate
+position: the expected pattern, not reagent lots.** k=3 clustering maps cleanly onto position (diagonal
+cross-tab) and **every run carries all three** (19/21 runs) — by-design within-plate mixes, not run/time
+(lot) blocks. The three share a near-identical overall mean (≈13.3 log2) but their per-protein profiles are
+**anti-correlated** (r ≈ −0.2 to −0.6; they differ most in Aβ38/Aβ40/pTau-217/PTN) → genuinely different
+compositions, as expected for three reference mixes.
+
+A targeted **within-year lot scan** of the HIHG/SC pools found **no sustained reagent/lot step beyond the
+2025↔2026 year shift**: within-year, run-to-run variation is mostly noise, and the only discrete within-2025
+break is the Nov-24/25 degradation already flagged in G.3 (two runs, not a sustained block). So the batch
+axis to adjust for remains **submission year** (plus the flagged plates).
+
+```{r g2b-control-multicolor, message=FALSE, warning=FALSE, fig.width=14, fig.height=11}
+if (!is.null(ctrl_scores)) {
+  yrc <- c("2025" = "#1b9e77", "2026" = "#d95f02")
+  flagc <- setNames(c("grey75", scales::hue_pal()(max(1, length(FLAGGED_RUNS)))), c("other plates", FLAGGED_RUNS))
+  cpanel <- function(d, color_by, ttl) {
+    g <- ggplot(d, aes(PC1, PC2, color = .data[[color_by]])) + geom_point(size = 1.4, alpha = .8) +
+      theme_bw(base_size = 9) + labs(title = ttl, x = "PC1", y = "PC2", color = color_by) +
+      theme(legend.key.size = unit(.25, "cm"), legend.text = element_text(size = 6),
+            legend.title = element_text(size = 7), plot.title = element_text(size = 9))
+    if (color_by == "year") g <- g + scale_color_manual(values = yrc)
+    if (color_by == "flag") g <- g + scale_color_manual(values = flagc)
+    g
+  }
+  rows <- lapply(unique(ctrl_scores$Control), function(ct) {
+    d <- ctrl_scores %>% filter(Control == ct)
+    has_pos <- dplyr::n_distinct(d$pos) > 1
+    third <- if (has_pos) "pos" else "flag"; tlab <- if (has_pos) "position" else "flagged plates"
+    cpanel(d, "year", paste0(ct, " — by year")) | cpanel(d, "Bay", paste0(ct, " — by Bay")) | cpanel(d, third, paste0(ct, " — by ", tlab))
+  })
+  .gmc <- patchwork::wrap_plots(rows, ncol = 1) +
+    patchwork::plot_annotation(title = "Control-pool PCAs colored multiple ways (identical material; all structure is technical)")
+  ggsave("output_files/pca_controls_multicolor.png", .gmc, width = 14, height = 11, dpi = 120)
+  print(.gmc)
+}
+```
+
+## G.3 Candidate problem plates — Bay-sequential drift (`20251124-1407`, `20251125-1332`)
+
+The HIHG control's 4 extreme wells are both Bay3 wells of two consecutive-day runs,
+**`20251124-1407_Bay3`** and **`20251125-1332_Bay3`**. The shift is a *within-run sequential Bay drift*
+(Bay1 → Bay2 → Bay3 monotonic in the identical control), **not** a Bay3-wide effect — other 2025 Bay3
+plates are normal. It is **plate-wide, not control-only**: study samples on these plates show the same
+gradient (CD40LG drops ≈4 log2 / 16× from Bay1 to Bay3, NEFH follows; PTN/Aβ42/pTau-217 move in the
+control's direction). `20251124-1407` is **also** the APOE off-band plate (APOE §C) — two QC modules
+independently flag it.
+
+**Do these need to be treated as a batch?** The shift is real and plate-wide, so these plates are *not*
+exchangeable with the rest — but the principled handling is to **model the hierarchy (year → Run →
+Run:Bay) as random effects** (which already absorbs a per-plate/bay shift) rather than invent a one-off
+batch label, **plus flag `20251124-1407` / `20251125-1332` for a leave-out sensitivity analysis** on the
+affected markers (CD40LG, NEFH, PTN, Aβ42, pTau-217). Validate any correction on the HIHG control (its
+within-plate variance on these plates should shrink afterward). A blanket whole-plate correction
+calibrated on the control would *over-correct* markers where study samples drift less than the control
+(e.g. PTN: ≈1 log2 in the control vs ≈0.1 in study samples).
+
+---
+
+# H. Sample-level PCA (outlier identification & structure)
+
+PCA of all study samples (biomarker matrix, scaled, mean-imputed). Per-sample PC1–4 are written to
+`pc_scores_per_sample.csv` (sorted most-extreme first, with robust-z outlier flags) so individual outliers
+can be named. The association table shows **which variable each PC captures** — on this data PC1–PC2 is
+largely outlier/intensity-driven and the ancestry/site/year structure lives on **PC3**, so the featured plot
+is PC2 vs PC3.
+
+```{r h-study-pca, message=FALSE, warning=FALSE, results='asis'}
+pca_study <- df_samples
+Mst <- as.matrix(pca_study[, biomarker_cols])
+keepc <- apply(Mst, 2, function(c) sum(is.finite(c)) > 0 && sd(c, na.rm = TRUE) > 0); Mst <- Mst[, keepc, drop = FALSE]
+cm <- colMeans(Mst, na.rm = TRUE); for (j in seq_len(ncol(Mst))) { na <- !is.finite(Mst[, j]); if (any(na)) Mst[na, j] <- cm[j] }
+pst <- prcomp(Mst, scale. = TRUE); ve_st <- 100*summary(pst)$importance[2, 1:4]
+sc_st <- as.data.frame(pst$x[, 1:4]); names(sc_st) <- paste0("PC", 1:4)
+ps <- pca_study %>%
+  select(SAMPLE_ALIQUOT, SAMPLE, Run_ID, Bay, year,
+         any_of(c("Site","Ancestry","sex","age_at_subject","CDX_collapsed","metadata_source"))) %>%
+  bind_cols(sc_st)
+rzc <- function(x) { m <- mad(x); if (m == 0) return(rep(0, length(x))); (x - median(x))/(1.4826*m) }
+for (pc in paste0("PC", 1:4)) ps[[paste0("rz_", pc)]] <- round(rzc(ps[[pc]]), 2)
+ps$is_outlier <- with(ps, abs(rz_PC1) > 5 | abs(rz_PC2) > 5 | abs(rz_PC3) > 5 | abs(rz_PC4) > 5)
+ps <- ps %>% mutate(across(starts_with("PC"), ~round(.x, 3))) %>% arrange(desc(sqrt(PC1^2 + PC2^2 + PC3^2 + PC4^2)))
+write_csv(ps, "output_files/pc_scores_per_sample.csv")
+
+r2f <- function(pc, v) { ok <- !is.na(ps[[v]]); s <- summary(aov(ps[[pc]][ok] ~ factor(ps[[v]][ok])))[[1]]; round(100*s[1,"Sum Sq"]/sum(s[,"Sum Sq"]), 1) }
+assoc <- expand.grid(PC = paste0("PC", 1:4), var = intersect(c("year","Ancestry","Site","CDX_collapsed"), names(ps)), stringsAsFactors = FALSE)
+assoc$R2_pct <- mapply(r2f, assoc$PC, assoc$var); assoc <- tidyr::pivot_wider(assoc, names_from = var, values_from = R2_pct)
+write_csv(assoc, "output_files/pc_variable_association.csv")
+print(kable(assoc, caption = "% variance in each study PC explained by each variable (one at a time)") %>% kable_styling(full_width = FALSE))
+cat(sprintf("\n\n*Study PCA variance explained: PC1 %.1f%%, PC2 %.1f%%, PC3 %.1f%%, PC4 %.1f%%.*\n\n", ve_st[1], ve_st[2], ve_st[3], ve_st[4]))
+cat(sprintf("*Outliers (|robust z| > 5 on any PC1-4): %d — see `pc_scores_per_sample.csv` (sorted most-extreme first).*\n\n", sum(ps$is_outlier)))
+```
+
+```{r h-study-matrix, message=FALSE, warning=FALSE, fig.width=13, fig.height=8}
+anc_cols <- c(HI_WH = "#2166AC", HI_MU = "#74ADD1", HI_BL = "#92C5DE", AA = "#D6604D", AFDC = "#8B0000")
+labp <- function(p) sprintf("%s (%.1f%%)", p, ve_st[as.integer(substr(p, 3, 3))])
+prs <- list(c("PC1","PC2"), c("PC1","PC3"), c("PC1","PC4"), c("PC2","PC3"), c("PC2","PC4"), c("PC3","PC4"))
+pan <- function(xy, legend = FALSE) ggplot(ps %>% filter(!is.na(Ancestry)), aes(.data[[xy[1]]], .data[[xy[2]]], color = Ancestry)) +
+  geom_point(size = .4, alpha = .4) + stat_ellipse(linewidth = .4) + scale_color_manual(values = anc_cols, na.value = "grey75") +
+  theme_bw(base_size = 9) + labs(x = labp(xy[1]), y = labp(xy[2])) + theme(legend.position = if (legend) "right" else "none")
+.gmat <- patchwork::wrap_plots(c(lapply(prs[-1], pan), list(pan(prs[[1]], TRUE))), ncol = 3) +
+  patchwork::plot_annotation(title = "Study-sample PCA scatter-matrix (PC1-PC4), colored by ancestry")
+ggsave("output_files/pca_study_matrix.png", .gmat, width = 13, height = 8, dpi = 120)
+print(.gmat)
+```
+
+```{r h-study-pc2pc3, message=FALSE, warning=FALSE, fig.width=13, fig.height=10}
+yr_cols <- c("2025" = "#1b9e77", "2026" = "#d95f02")
+featc <- function(fill, cols = NULL, legend = TRUE, ttl) {
+  d <- ps %>% filter(!is.na(.data[[fill]]))
+  g <- ggplot(d, aes(PC2, PC3, color = .data[[fill]])) + geom_point(size = .5, alpha = .45) + stat_ellipse(linewidth = .5) +
+    theme_bw(base_size = 10) + labs(title = ttl, x = labp("PC2"), y = labp("PC3"), color = fill) +
+    theme(legend.position = if (legend) "right" else "none", legend.key.size = unit(.3, "cm"), legend.text = element_text(size = 7))
+  if (!is.null(cols)) g <- g + scale_color_manual(values = cols, na.value = "grey75")
+  g
+}
+top_out <- ps %>% slice_max(sqrt(PC1^2 + PC2^2 + PC3^2 + PC4^2), n = 12)
+pol <- ggplot(ps, aes(PC2, PC3)) + geom_point(size = .4, alpha = .3, color = "grey60") +
+  geom_point(data = top_out, color = "red", size = 1.5) +
+  ggrepel::geom_text_repel(data = top_out, aes(label = SAMPLE_ALIQUOT), size = 2.3, max.overlaps = 20) +
+  theme_bw(base_size = 10) + labs(title = "12 most extreme (labeled)", x = labp("PC2"), y = labp("PC3"))
+.gpc23 <- (featc("Ancestry", anc_cols, TRUE, "by ancestry") | featc("year", yr_cols, TRUE, "by year")) /
+      (featc("Site", NULL, FALSE, "by site") | pol) +
+      patchwork::plot_annotation(title = "Study-sample PCA - PC2 vs PC3 (the ancestry/site/year plane)")
+ggsave("output_files/pca_study_PC2PC3.png", .gpc23, width = 13, height = 10, dpi = 120)
+print(.gpc23)
+```
+
+---
+
+# I. Summary and Decision
 
 ```{r decision, message=FALSE, warning=FALSE}
 n_sig_run      <- sum(batch_test_results$Sig_Run, na.rm=TRUE)
@@ -662,15 +1003,34 @@ if (n_sig_run == 0 && median_run_var < 5) {
   cat("-> Run sensitivity analysis with and without correction.\n")
 } else {
   cat("Batch effects SUBSTANTIAL.\n")
-  cat("-> Apply ComBat (sva::ComBat) with Race + sex + age as protected covariates.\n")
+  cat("-> Apply ComBat (sva::ComBat) with Ancestry + sex + age as protected covariates.\n")
   cat("-> Validate correction using HIHG replicate ICC post-correction.\n")
 }
 
+cat("\n=== WHAT TO ADJUST FOR (this dataset) ===\n")
+if (!is.na(year_pc1_r2)) {
+  cat(sprintf("- SUBMISSION YEAR (2025 vs 2026): the dominant batch axis (HIHG PC1 %.0f%% year; %d proteins shift;\n",
+              100*year_pc1_r2, n_year_sig))
+  cat(sprintf("  unsupervised clustering splits %.0f%% of plates by year). Adjust for YEAR (or Run nested in year)\n",
+              100*plates_split))
+  cat("  in EVERY cross-year analysis, or ComBat by year; anchor/validate the correction on the HIHG control.\n")
+}
+.site_conf <- suppressWarnings(max(conf_results$CramersV[conf_results$Covariate == "Site"], na.rm = TRUE))
+if (is.finite(.site_conf) && .site_conf > 0.3)
+  cat(sprintf("- SITE: moderate confounding with Run (Cramers V %.2f). Include Site as a COVARIATE; do not 'correct'\n  it away (site is partly design/biology).\n", .site_conf))
+cat("- Keep biological covariates (Ancestry, sex, age, diagnosis) PROTECTED -- never regress them out.\n")
+
 cat("\n=== OUTPUT FILES ===\n")
-cat("batch_covariate_confounding.csv  - Cramers V between batch and covariates\n")
+cat("batch_covariate_confounding.csv  - Cramers V between batch (incl. year) and covariates\n")
 cat("variance_partition_results.csv   - Per-protein variance fractions\n")
-cat("icc_results.csv                  - Per-protein ICC within-Run and cross-Run\n")
-cat("batch_effect_test_results.csv    - Per-protein p/FDR for Run and Bay terms\n")
+cat("icc_results.csv                  - Per-protein ICC (biological duplicates): cross-Run + within-Run (not estimable)\n")
+cat("control_reproducibility.csv      - Per-protein variance components (Run/Bay/well) + SD + CV for HIHG/SC/IPC pools (E.2)\n")
+cat("year_effect_per_protein.csv      - Per-protein 2025-vs-2026 shift (HIHG control); hihg_pca_by_year.png\n")
+cat("batch_effect_test_results.csv    - Per-protein p/FDR for Run and Bay terms (nested F-test)\n")
+cat("pc_scores_controls.csv           - Per control well PC1-4 + position + off-year-cluster flag (G.2)\n")
+cat("pca_controls_by_year.png / pca_controls_multicolor.png - control PCAs (by year; and by year/Bay/position) (G.2)\n")
+cat("pc_scores_per_sample.csv         - Per study sample PC1-4 (+ robust-z outlier flags), sorted most-extreme (H)\n")
+cat("pc_variable_association.csv      - % variance of each study PC explained by year/ancestry/site/diagnosis (H)\n")
 ```
 
 ---

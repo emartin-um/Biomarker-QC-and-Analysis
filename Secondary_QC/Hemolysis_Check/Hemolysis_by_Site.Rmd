@@ -60,6 +60,9 @@ cat("Available hemolysis markers:", paste(hemolysis_available, collapse=", "), "
 # Updated 2026-06-21 — fixed "metatada_source" typo (real col is "metadata_source")
 # and added ResultQC, ID2, is_repeat_subject, is_most_recent (non-numeric QC/ID cols
 # that otherwise fall into biomarker_cols and crash lm()).
+# Updated 2026-06-23 (50-plate combined) — added gp_APOE, n_visits, subject_visit_n,
+# AlamarWarning, PrimaryQC: NUMERIC QC/ID cols not caught by the non-numeric guard, which
+# otherwise leak into biomarker_cols (134 vs the true 131) and contaminate the Site-effect FDR.
 metadata_cols <- c("metadata_source", "ResultQC", "ID2",
                    "is_repeat_subject", "is_most_recent",
                    "RUN", "SAMPLE_ALIQUOT", "SAMPLE", "Record_ID",
@@ -68,6 +71,7 @@ metadata_cols <- c("metadata_source", "ResultQC", "ID2",
                    "CDX", "CDX_collapsed", "Case_Control", "AOO", "Years_Onset",
                    "APOE.geno", "APOE.geno_final", "APOE_WGS", "APOE_WGS_norm",
                    "APOE_WGS_changed", "APOE4_count", "APOE4_carrier", "E4_dose",
+                   "gp_APOE", "n_visits", "subject_visit_n", "AlamarWarning", "PrimaryQC",
                    "Ancestry", "European_anc_pct",
                    "height_inches", "weight_lb", "BMI", "Site", "Country/State",
                    "country_of_birth", "Group_Race_Ethnicity", "___1", "Run", "Bay")
@@ -1028,11 +1032,16 @@ if (file.exists(rep_file)) {
     # For all biomarkers, correlate with HBA1
     if ("HBA1" %in% names(df_hemo)) {
 
-      # Get biomarkers that are also in replicate data (so we have tech variance)
-      biomarkers_in_both <- intersect(biomarker_cols, names(df_reps))
+      # Screen ALL biomarkers against HBA1. The main data uses underscore names (A_38, pTau_217)
+      # while the replicate file uses Greek-beta/hyphen names (Aβ38, pTau-217); a plain intersect()
+      # silently dropped the amyloid/pTau markers (the most important to screen). Normalize names so
+      # Tech_CV is matched from reps when available, but test every biomarker that has HBA1 data.
+      .norm <- function(x) toupper(gsub("[^A-Za-z0-9]", "", gsub("β", "", x)))
+      rep_map <- setNames(names(df_reps), .norm(names(df_reps)))   # normalized name -> rep colname
+      biomarkers_to_test <- intersect(biomarker_cols, names(df_hemo))
 
       # Calculate correlation with HBA1 for each biomarker
-      hba1_cors <- map_df(biomarkers_in_both, function(biom) {
+      hba1_cors <- map_df(biomarkers_to_test, function(biom) {
         test_data <- df_hemo %>%
           select(HBA1, all_of(biom)) %>%
           drop_na()
@@ -1040,8 +1049,9 @@ if (file.exists(rep_file)) {
         if (nrow(test_data) >= 50) {
           cor_res <- cor.test(test_data$HBA1, test_data[[biom]], method = "pearson")
 
-          # Also get tech CV if available
-          rep_vals <- df_reps[[biom]]
+          # Also get tech CV if available (match rep column by normalized name)
+          rep_col  <- rep_map[[.norm(biom)]]
+          rep_vals <- if (!is.null(rep_col)) df_reps[[rep_col]] else NULL
           rep_vals <- rep_vals[!is.na(rep_vals) & rep_vals > 0]
           tech_cv <- if (length(rep_vals) >= 10) (sd(rep_vals) / mean(rep_vals)) * 100 else NA
 

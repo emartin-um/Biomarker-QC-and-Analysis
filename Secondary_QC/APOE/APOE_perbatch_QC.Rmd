@@ -45,9 +45,14 @@ stopifnot(all(c("SAMPLE_ALIQUOT", "APOE.geno", "APOE4", "APOE") %in% names(dat))
 
 apoe_levels <- c("22","23","33","24","34","44")
 .clean <- function(x) { y <- gsub("\\s|/", "", trimws(as.character(x))); y[y == ""] <- NA; y }
-dat$APOEgeno         <- factor(.clean(dat$APOE.geno), levels = apoe_levels)
-dat$APOE4_minus_APOE <- dat$APOE4 - dat$APOE
 has_wgs <- "APOE_WGS" %in% names(dat) && any(!is.na(dat$APOE_WGS))
+# WGS-default genotype for banding (the stated policy; matches the APOE4_count dosage used in C/D).
+# Prefer the remapped APOE.geno_final; else coalesce(WGS, Sanger); else raw Sanger. (Section B below
+# still reads raw APOE.geno directly for the Sanger-vs-WGS comparison.)
+.geno_band <- if ("APOE.geno_final" %in% names(dat)) dat$APOE.geno_final else
+              if (has_wgs) dplyr::coalesce(dat$APOE_WGS, dat$APOE.geno) else dat$APOE.geno
+dat$APOEgeno         <- factor(.clean(.geno_band), levels = apoe_levels)
+dat$APOE4_minus_APOE <- dat$APOE4 - dat$APOE
 
 # plate = run-bay (RUN already encodes Bay). Drives the by-plate facet/lollipop figure heights.
 has_run     <- "RUN" %in% names(dat) && any(!is.na(dat$RUN))
@@ -67,11 +72,13 @@ reported (Section B) — a cluster of them is the WGS plate-swap signal, correct
 Samples far from their genotype's band are candidate genotype/label or assay problems.
 Bands are **per-plate** (each run-bay vs. itself): plates legitimately drift a little, and this is QC —
 not genotype-calling — so we absorb that and flag only **big within-plate** deviations. **Important:** a
-broadly-shifted or scrambled plate **self-bands** (its inflated within-genotype spread swallows its own
-outliers), so it shows **few** outliers *here* — such a plate is caught instead by the cross-plate
-**per-run screen (Section C)** and is fully characterised in the **follow-up investigation** (which bands
-against the CLEAN plates). The faceted view below overlays a **pooled reference band** so a shifted plate
-is still visible at a glance.
+broadly-shifted or scrambled plate would normally **self-band** (its inflated within-genotype spread
+swallows its own outliers), so to prevent that a **high-spread plate** (within-genotype IQR ≫ the typical
+plate's) is forced to use the **clean per-genotype reference band** instead of its own — so its scattered
+points *are* flagged here (e.g. the Bay1 APOE4-scramble plate surfaces as the most outliers, not the
+fewest). The faceted view below overlays a **pooled reference band** so a shifted plate is visible at a
+glance, and Section C's per-run screen catches plate-level shifts independently. Genotype = the WGS-default
+call (`APOE.geno_final`), so known Sanger errors that WGS corrected are not re-flagged here.
 
 ```{r outliers}
 #| results: asis
@@ -177,7 +184,7 @@ cat(sprintf("\n\nWrote `Outliers_Ranked.xlsx` (%d) and `APOE4_minus_APOE_extreme
 
 ## Same view, by plate
 
-Each plate (run-bay) faceted, with the **3×IQR cutoff band per genotype** (dashed red) drawn identically
+Each plate (run-bay) faceted, with the **clean per-genotype reference band** (blue dashed) drawn identically
 in every facet — a plate whose points push past the band, or sit shifted, stands out at a glance.
 
 ```{r outliers-by-plate, fig.width=10, fig.height=fig_h_facet}
@@ -212,10 +219,11 @@ if (!has_wgs) {
   cat("*No `APOE_WGS` calls in this batch — concordance check skipped.*\n\n")
 } else {
   dat$APOEgeno_WGS <- factor(.clean(dat$APOE_WGS), levels = apoe_levels)
-  conc <- dat %>% filter(!is.na(APOEgeno), !is.na(APOEgeno_WGS)) %>%
-    mutate(orig = .clean(APOE.geno), wgs = .clean(APOE_WGS), concordant = orig == wgs)
+  apoe_sanger      <- factor(.clean(dat$APOE.geno), levels = apoe_levels)   # raw Sanger (B compares Sanger vs WGS)
+  conc <- dat %>% mutate(orig = .clean(APOE.geno), wgs = .clean(APOE_WGS)) %>%
+    filter(!is.na(orig), !is.na(wgs)) %>% mutate(concordant = orig == wgs)
   n_wgs    <- sum(!is.na(dat$APOEgeno_WGS))
-  n_gained <- sum(is.na(dat$APOEgeno) & !is.na(dat$APOEgeno_WGS))
+  n_gained <- sum(is.na(apoe_sanger) & !is.na(dat$APOEgeno_WGS))
   cat(sprintf("- Samples with a WGS genotype: **%d** / %d (%.1f%%)\n", n_wgs, nrow(dat), 100*n_wgs/nrow(dat)))
   cat(sprintf("- Gained a genotype from WGS (Sanger was NA): **%d**\n", n_gained))
   cat(sprintf("- Concordance where both available: **%.1f%%** (%d/%d)\n", 100*mean(conc$concordant),

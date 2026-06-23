@@ -131,6 +131,13 @@ Derived columns produced:
 
 #### WGS plate-swap — correction REVERTED; mask-to-Sanger (updated 2026-06-15)
 
+> **2026-06-23 update (50-plate combined / `n4328_2026Jun22` metadata).** The mask-to-Sanger idmap step
+> below is **superseded** for runs on the Jun22 metadata: the swap is now corrected **upstream**, with the
+> MIDI re-map baked into the metadata as the `gp_APOE` column (`APOE_WGS = coalesce(gp_APOE, APOE_WGS)`).
+> Step 6d then applies a plain `APOE.geno_final = coalesce(APOE_WGS_norm, APOE.geno)` — **no idmap read, no
+> masking** (verified: `APOE.geno_final == coalesce(APOE_WGS_norm, APOE.geno)`, 0 mismatches across 3552).
+> Affected samples now use the **corrected WGS** call, not a Sanger fallback. The narrative below is history.
+
 The May-2026 WGS delivery had a sample mix-up on the AD-Hispanic set that attached the wrong WGS APOE genotype to ~282 Hispanic samples. A **2026-06-08 geometric correction** (chrX fingerprint; the old `apply_wgs_plate_swap_correction.R` → `..._plateswapcorrected_2026Jun.csv`) was later found **incorrect**, reverted, and the script + its output **deleted (2026-06-15)**. The more complete chromosome-1 analysis (`../../../May_2026_WGS_QC/WGS_Plate_Swap_Summary_2026Jun11.md`) identifies the **WGS itself** as the mislabeled platform (MIDI re-array geometry). **Current pipeline behavior:** Step 6d **masks the ~282 affected samples to Sanger** via `WGS_chr1_corrected_idmap_2026Jun11.csv` — no relabel applied. The latest candidate re-map is the standalone `QC_Runs/QC_ALZ123_repro_2026Jun/WGS_Midi_Remap/remap_wgs_midi_plateswap.R` (WGS-vs-Sanger agreement 47%→99.6%) — a **PROPOSAL pending USUHS confirmation**, kept with its run (not in the repo) and not wired into the merge. For the affected samples, prefer Sanger (`APOE.geno`).
 
 - The two June-8 files are archived in `Datasets/archive/` — **do not use.**

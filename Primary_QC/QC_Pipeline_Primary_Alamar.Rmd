@@ -1230,8 +1230,8 @@ low_det_low_counts_table <- detect[detect$Biomarker %in% low_det_low_counts$Biom
 
 # View tables
 knitr::kable(
-  low_detect_table, 
-  caption = "Low-detectability (min det>50%) biomarkers added back:"
+  low_detect_table,
+  caption = "Low-detectability (min det ≤50%) biomarkers with adequate read counts (routed to the Low output file):"
 )
 knitr::kable(
   low_det_low_counts_table, 
@@ -1438,7 +1438,7 @@ knitr::kable(
 
 cat("QC'd Biomarkers:", dim(combined_qc_full)[2]-3, "\n")
 qc_file <- file.path("output_files", sub("\\.csv$", "_post_QC.csv", NPQ_data))
-write.csv(combined_qc_full, qc_file, row.names = TRUE)
+write.csv(combined_qc_full, qc_file, row.names = FALSE)  # SampleID is already a column; avoid a stray index col (matches files 2-4)
 cat("Saved:", qc_file, "\n")
 
 #Output file 2

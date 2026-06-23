@@ -43,7 +43,7 @@ Per-batch APOE QC: validates the APOE assay against genotype and surfaces discor
 `APOE_geno_protein.qmd` is the **archived** May-2026 investigation record (`_archive_APOE_pre_perbatch_2026Jun16/`),
 not the current pipeline. See `README.Rmd` for full details.
 
-### Batch_Effects/ ⚠️ NEW — NEEDS TESTING
+### Batch_Effects/ — variance partition · ICC · submission-year batch structure
 Assesses Run- and Bay-level technical batch effects in the merged dataset. Quantifies
 how much variance in each protein is explained by batch vs. biological covariates,
 and makes a data-driven recommendation for whether batch correction is needed.
@@ -54,11 +54,12 @@ Requires `Metadata_Merge` output (`merged_combined_post_QC.csv`).
 - `Batch_Effects_Analysis.Rmd` - Full batch effect assessment
 
 **Key outputs:**
-- `batch_covariate_confounding.csv` — Cramér's V between Run/Bay and Race/sex/age/Site/Dx
-- `variance_partition_results.csv` — Per-protein % variance attributed to Run, Bay, biology
-- `icc_results.csv` — Per-protein ICC within-Run (across Bays) and cross-Run
+- `batch_covariate_confounding.csv` — Cramér's V between Run/Bay/**year** and the **derived** covariates (Ancestry, CDX_collapsed, sex, age, Site)
+- `variance_partition_results.csv` — Per-protein % variance: Run, Bay, Ancestry, CDX_collapsed, sex, Site, age
+- `icc_results.csv` — Per-protein ICC within-Run (across Bays) and cross-Run (from replicate samples)
 - `batch_effect_test_results.csv` — Per-protein FDR-corrected F-test for Run and Bay terms
-- Summary section with automated correction recommendation
+- `year_effect_per_protein.csv` + `hihg_pca_by_year.png` — **submission-year (2025 vs 2026) structure**: HIHG-control PCA/clustering + per-protein year shift
+- Summary section ending with a concrete **what-to-adjust-for** recommendation (year, Site)
 
 **Required packages (beyond base tidyverse):**
 ```r
@@ -66,8 +67,11 @@ BiocManager::install(c("variancePartition", "BiocParallel"))
 install.packages(c("lme4", "irr", "patchwork", "car"))
 ```
 
-> **TODO:** Script was written March 2026 and has not yet been knitted on real data.
-> Run on current dataset, check output, and add notes to `notes.md`.
+> **Status (2026-06-23):** tested on the 50-plate combined run. Reads `merged_combined` (keeps the
+> replicate samples the ICC needs) and **joins the derived covariates** (Ancestry, CDX_collapsed) from
+> `filtered_combined`; `variancePartition` models categoricals as random effects; a submission-year
+> (2025 vs 2026) clustering section + adjust-for recommendation were added. On this dataset the dominant
+> batch axis is the **submission year**, confounded with **Site** (Cramér's V 0.55).
 
 ---
 

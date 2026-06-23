@@ -29,6 +29,11 @@ knit: |
 
 <!--
 CHANGELOG — Metadata_Merge_Pipeline.Rmd
+  2026-06-23: NEW Step 1b — refresh the metadata `PrimaryQC` column from the latest Primary_QC results
+   (retained -> PASS, triaged/bad -> Triage; samples not assayed in this batch keep prior, blank -> Pending).
+   OVERWRITES in-batch values (the QC run is authoritative). The refreshed column propagates to the
+   merged/filtered outputs; writes <output_dir>/metadata_PrimaryQC_refreshed.csv + reports/PrimaryQC_update.xlsx.
+   Runs only in the full (non-filter-only) path when a PrimaryQC column is present.
   2026-06-17: mapping_key_Ancestry now ALWAYS written. Previously it was written only when
    <review_dir>/Ancestry_review.csv existed; runs using the built-in ancestry_config (no review CSV)
    silently produced no key even though the HTML output-files list (~L1859) always advertises it.
@@ -136,6 +141,7 @@ This pipeline merges post-QC biomarker data with sample metadata and applies exc
 **Pipeline Steps:**
 
 1.  **Input Files** - Verify/copy post-QC files from Primary_QC
+1b. **Refresh PrimaryQC** *(if a `PrimaryQC` column is present)* — overwrite it from this run's Primary_QC triage (retained → PASS, triaged/bad → Triage; samples not in this batch keep prior, blank → Pending); writes `metadata_PrimaryQC_refreshed.csv` + `reports/PrimaryQC_update.xlsx`
 2.  **Merge Data** - Merge biomarker data with metadata (APOE.geno normalized to `"a/b"` format)
 2b. **Known Duplicate / Longitudinal Cross-Check** *(optional, if `Dup_sample_or_ind_*.xlsx` present)* — load the lab's independent list to cross-check Steps 3 & 8
 3.  **Quality Control** - Identify duplicates, implausible values, and issues. Duplicates keep the most-recent run **provisionally**, overridable by the lab via `<review_dir>/Duplicate_review.csv`; both runs are written to `filtered/filtered_combined_duplicates.csv` for Replicate_Analysis
@@ -302,6 +308,81 @@ if (!FILTER_ONLY) {
   meta_tmp <- meta_tmp %>% rename(APOE.geno = APOE)
   metadata_cols_captured <- c(names(meta_tmp), "Group_Race_Ethnicity")
   rm(meta_tmp)
+}
+```
+
+# Step 1b: Refresh PrimaryQC from latest Primary_QC results {#step1b}
+
+The metadata's `PrimaryQC` status column is refreshed here from **this run's** Primary_QC outputs so it
+reflects the latest triage decisions (the QC run is authoritative for the samples it assayed):
+**retained post-QC → `PASS`**, **triaged → `Triage`**, **pre-QC bad → `Triage`**; samples not assayed in
+this batch keep their prior value (blank → `Pending`). The refreshed column propagates to the merged /
+filtered outputs, and a refreshed full-metadata copy + change log are written for the lab. Runs only in
+the full (non–filter-only) path and only when a `PrimaryQC` column is present.
+
+```{r}
+#| label: step1b-refresh-primaryqc
+#| include: false
+
+PRIMARYQC_REFRESHED <- FALSE
+pq_changes <- NULL
+if (!FILTER_ONLY && "PrimaryQC" %in% names(metadata)) {
+  .rd_ids <- function(fname, col = "SampleID") {
+    f <- file.path(PRIMARY_QC_OUTPUT, fname)
+    if (!file.exists(f)) return(character(0))
+    d <- suppressMessages(readr::read_csv(f, show_col_types = FALSE))
+    if (col %in% names(d)) unique(as.character(d[[col]])) else character(0)
+  }
+  triaged  <- .rd_ids("samples_to_triage.csv")
+  bad      <- .rd_ids("bad_samples.csv")
+  retained <- unique(as.character(biomarkers_postQC$SampleID))   # cleared post-QC this run
+
+  .sa  <- as.character(metadata$SAMPLE_ALIQUOT)
+  .old <- as.character(metadata$PrimaryQC)
+  metadata$PrimaryQC <- dplyr::case_when(
+    .sa %in% triaged           ~ "Triage",
+    .sa %in% bad               ~ "Triage",
+    .sa %in% retained          ~ "PASS",
+    is.na(.old) | .old == ""   ~ "Pending",
+    TRUE                       ~ .old
+  )
+  pq_changes <- tibble::tibble(SAMPLE_ALIQUOT = .sa,
+                               PrimaryQC_old = .old,
+                               PrimaryQC_new = metadata$PrimaryQC) %>%
+    dplyr::filter(PrimaryQC_old != PrimaryQC_new |
+                  (is.na(PrimaryQC_old) & !is.na(PrimaryQC_new)))
+  PRIMARYQC_REFRESHED <- TRUE
+}
+```
+
+```{r}
+#| label: step1b-report
+#| echo: false
+#| results: asis
+
+if (!FILTER_ONLY && PRIMARYQC_REFRESHED) {
+  cat("**Status after refresh (full metadata, n = ", nrow(metadata), "):**\n\n", sep = "")
+  print(kable(as.data.frame(table(PrimaryQC = metadata$PrimaryQC)),
+              col.names = c("PrimaryQC", "n")) %>%
+          kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE))
+  cat("\n**Updated ", nrow(pq_changes), " sample(s)** vs the incoming metadata", sep = "")
+  if (nrow(pq_changes) > 0) {
+    cat(":\n\n")
+    print(kable(dplyr::count(pq_changes, PrimaryQC_old, PrimaryQC_new, name = "n"),
+                caption = "PrimaryQC changes (old -> new)") %>%
+            kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE))
+  } else cat(" (none).\n\n")
+
+  # Refreshed full metadata + change log, so the lab can adopt the updated PrimaryQC.
+  readr::write_csv(metadata, file.path(OUTPUT_DIR, "metadata_PrimaryQC_refreshed.csv"))
+  .rdir <- file.path(OUTPUT_DIR, "reports"); dir.create(.rdir, showWarnings = FALSE, recursive = TRUE)
+  if (requireNamespace("writexl", quietly = TRUE))
+    writexl::write_xlsx(pq_changes, file.path(.rdir, "PrimaryQC_update.xlsx"))
+  else readr::write_csv(pq_changes, file.path(.rdir, "PrimaryQC_update.csv"))
+  cat("\nWrote refreshed full metadata -> `", basename(OUTPUT_DIR),
+      "/metadata_PrimaryQC_refreshed.csv` and change log -> `reports/PrimaryQC_update.xlsx`.\n\n", sep = "")
+} else if (!FILTER_ONLY) {
+  cat("*No `PrimaryQC` column in the metadata - refresh skipped.*\n\n")
 }
 ```
 
@@ -684,11 +765,13 @@ if (!FILTER_ONLY) {
 if (!FILTER_ONLY) {
   cat("\n## Implausible Values\n\n")
 
+  # Column names are weight_lb / height_inches (imperial), not weight/height — the old
+  # metric keys silently skipped these checks (the `if (var %in% names(...))` guard below).
   plausible_ranges <- list(
     age_at_subject = c(18, 110),
     BMI = c(10, 80),
-    weight = c(30, 300),
-    height = c(100, 250)
+    weight_lb = c(60, 660),
+    height_inches = c(39, 96)
   )
 
   implausible_list <- list()
