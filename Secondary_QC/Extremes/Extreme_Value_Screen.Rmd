@@ -1,0 +1,251 @@
+---
+title: "Extreme-Value Screen — Samples for Clinical Review"
+subtitle: "Secondary QC · Alamar NULISAseq CNS panel"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    theme: flatly
+params:
+  data_dir: "../../datasets"
+  u19_rds: "preprocessed_data_U19.rds"
+  other_rds: "preprocessed_data_OtherProjects.rds"
+  output_dir: "output_files"
+  thr_int: 2.75
+  panel_hit: 1.8
+  panel_score_thr: 2.0
+  panel_min_hit: 2
+  lone_int_thr: 3.0
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5.5, dpi = 110)
+suppressPackageStartupMessages({
+  library(dplyr); library(ggplot2); library(DT); library(pheatmap)
+})
+source("extreme_helpers.R")
+
+dt <- function(df, caption = NULL, pageLength = 12) {
+  DT::datatable(df, rownames = FALSE, filter = "top", caption = caption,
+                extensions = "Buttons",
+                options = list(pageLength = pageLength, scrollX = TRUE, dom = "Bfrtip",
+                               buttons = c("copy","csv")))
+}
+```
+
+```{r load-run}
+# --- load + pool the two cohorts (one reference distribution) ----------------
+u19o <- readRDS(file.path(params$data_dir, params$u19_rds))
+otho <- readRDS(file.path(params$data_dir, params$other_rds))
+u19 <- u19o$data; u19$dataset <- "U19"
+oth <- otho$data; oth$dataset <- "OtherProjects"
+common <- intersect(names(u19), names(oth))
+dat <- bind_rows(u19[, common], oth[, common])
+biomarker_cols <- u19o$biomarker_cols
+stopifnot(!any(duplicated(dat$SAMPLE)))
+
+# --- one shared compute pipeline (same as run_extreme_screen.R) --------------
+res    <- run_extreme_pipeline(dat, biomarker_cols,
+                               thr_int = params$thr_int, panel_hit = params$panel_hit,
+                               panel_score_thr = params$panel_score_thr,
+                               panel_min_hit = params$panel_min_hit,
+                               lone_int_thr = params$lone_int_thr)
+master <- res$master; short <- res$short; long_ext <- res$long_ext; ref <- res$ref
+INT <- res$int; rownames(INT) <- res$dat$SAMPLE
+
+# --- (re)write the CSV outputs so a render reproduces them -------------------
+OUT <- params$output_dir; dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
+write.csv(ref,      file.path(OUT, "extreme_reference_stats.csv"),    row.names = FALSE)
+write.csv(long_ext, file.path(OUT, "extreme_marker_long.csv"),        row.names = FALSE)
+write.csv(master,   file.path(OUT, "extreme_sample_master.csv"),      row.names = FALSE)
+write.csv(short,    file.path(OUT, "clinician_review_shortlist.csv"), row.names = FALSE)
+
+disease_markers <- intersect(unique(unlist(lapply(PANELS, function(p) names(p$markers)))), res$markers)
+n_hi <- sum(short$priority == "HIGH")
+```
+
+# What this is, in one paragraph {-}
+
+This screen scans every sample on the **`r length(res$markers)`** Alamar CNS-panel
+biomarkers and flags the participants whose values are **unusually extreme** —
+either on a single marker or, more compellingly, across a **coordinated
+disease signature** (motor-neuron disease / ALS, Parkinson–Lewy synucleinopathy,
+AD tau, brain-derived pTau, an acute inflammatory state, or low amyloid). The
+goal is *not* a diagnosis — these are relative (NPQ) protein levels — but a
+**short, prioritised list of people a clinician may want to look at more
+closely**, because the protein pattern hints at something specific or
+unexpected (e.g. a cognitively-normal person already carrying a strong tau
+signature, or two pathologies at once). Pooled cohort: **`r nrow(dat)`** samples
+(U19 `r sum(dat$dataset=='U19')` + OtherProjects `r sum(dat$dataset=='OtherProjects')`).
+**`r nrow(short)`** samples are shortlisted (**`r n_hi` HIGH** priority).
+
+> **Start here:** open `output_files/clinician_review_shortlist.csv`, filter to
+> `priority == "HIGH"`, and read the `review_reason` column. Everything below
+> explains and visualises that list.
+
+# Method (how a sample gets flagged)
+
+```{r method-note, results='asis', echo=FALSE}
+cat(sprintf("
+* **Reference:** the two cohorts are **pooled** into one reference distribution (same assay / per-batch NPQ normalisation), so 'extreme' means *extreme relative to the whole Alamar population assayed here*. Each sample is tagged U19 / OtherProjects.
+* **Screening metric — rank-based inverse-normal (INT).** For every marker, values are rank-transformed to a standard-normal scale, `INT = qnorm((rank-0.5)/n)`. This makes 'extreme' mean the **same empirical rarity for every marker** regardless of its distribution shape — essential because several markers have tight cores / genotype-driven multimodality where a raw z-score over-flags. A single-marker **extreme event** is `|INT| >= %.2f` (≈ top/bottom %.2f%%). Magnitude is still reported as `robust_z` (median/MAD) and the raw value, so you can see *how* far out a value is.
+* **Both tails screened.** A very **low** value is flagged too (e.g. a low A42/A40 ratio = possible amyloid deposition).
+* **Disease panels.** Each signature scores the **mean oriented INT** across its markers and counts how many are individually in the tail. A panel fires when the whole signature is elevated *or* ≥3 of its markers spike (the latter catches a 'storm' where a subset is very high but the mean is diluted).
+* **Excluded from the screen:** `APOE4`, `APOE` (genotype-determined; APOE4 is also confounded by the `20251124-1407_Bay1` assay anomaly). Markers with known functional variants / tight cores (CHIT1, PTN, …) are kept but **tagged 'caution'** in the reference table.
+* **Caveats surfaced inline:** high hemolysis (HBA1 / RBC-leakage markers), 'global outlier' (≥8 markers extreme → possibly a bad sample, not biology), and the Bay1 APOE4 run.
+",
+params$thr_int, (1 - pnorm(params$thr_int)) * 100))
+```
+
+# Screen summary
+
+```{r summary-tables}
+cat(sprintf("Single-marker extreme events: %d, across %d distinct samples (%.1f%% of cohort).\n",
+            nrow(long_ext), length(unique(long_ext$SAMPLE)),
+            100 * length(unique(long_ext$SAMPLE)) / nrow(dat)))
+cat(sprintf("Global outliers (>=8 markers extreme - check sample quality): %d\n",
+            sum(master$global_outlier)))
+
+knitr::kable(as.data.frame.matrix(table(short$priority, short$dataset)),
+             caption = "Shortlist: priority x dataset")
+knitr::kable(as.data.frame.matrix(table(short$CDX_collapsed, short$priority)),
+             caption = "Shortlist: clinical dx x priority")
+```
+
+```{r panel-hit-bar, fig.height=4.5}
+pn_cols <- paste0(names(PANELS), "_score")
+hit_long <- do.call(rbind, lapply(names(PANELS), function(pn) {
+  sc <- master[[paste0(pn,"_score")]]; nh <- master[[paste0(pn,"_nhit")]]
+  thr_pn <- panel_thr(pn, params$panel_score_thr)
+  hit <- (!is.na(sc) & sc >= thr_pn & nh >= params$panel_min_hit) | (!is.na(nh) & nh >= 3)
+  data.frame(panel = pn, master[hit, c("CDX_collapsed"), drop = FALSE])
+}))
+ggplot(hit_long, aes(reorder(panel, panel, length), fill = CDX_collapsed)) +
+  geom_bar() + coord_flip() +
+  scale_fill_brewer(palette = "Set1", na.value = "grey70") +
+  labs(title = "Disease-signature hits by panel, coloured by clinical diagnosis",
+       x = NULL, y = "samples flagged", fill = "Dx") + theme_minimal(base_size = 12)
+```
+
+# The most "special" cases — discordant & mixed pathology
+
+These are the highest-yield rows: people whose protein pattern is **out of step
+with their clinical picture** (cognitively normal or young, yet carrying a
+pathology signature) or who show **two distinct pathologies at once**.
+
+```{r special-table}
+special <- short %>%
+  filter(n_pathology_axes >= 2 |
+         (CDX_collapsed == "NCI" & n_pathology_axes >= 1) |
+         (age_young & n_pathology_axes >= 1)) %>%
+  arrange(desc(n_pathology_axes), desc(best_panel_score)) %>%
+  transmute(SAMPLE, priority, dataset, CDX = CDX_collapsed, age = round(age_at_subject,1),
+            sex, pathology_axes, best_panel_score, review_reason, review_caveat)
+dt(special, caption = sprintf("%d discordant / mixed-pathology cases", nrow(special)), pageLength = 12)
+```
+
+```{r heatmap, fig.width=10, fig.height=8}
+# Heatmap of the top HIGH-priority cases x disease markers (INT scale).
+top_ids <- head(short$SAMPLE[short$priority == "HIGH"], 35)
+dm <- disease_markers[disease_markers %in% colnames(INT)]
+mat <- INT[as.character(top_ids), dm, drop = FALSE]
+mat[is.na(mat)] <- 0
+ann <- data.frame(Dx = short$CDX_collapsed[match(top_ids, short$SAMPLE)],
+                  Axes = ifelse(short$pathology_axes[match(top_ids, short$SAMPLE)] == "",
+                                "-", short$pathology_axes[match(top_ids, short$SAMPLE)]),
+                  row.names = as.character(top_ids))
+pheatmap(mat, color = colorRampPalette(c("#2166AC","white","#B2182B"))(51),
+         breaks = seq(-3.6, 3.6, length.out = 52),
+         annotation_row = ann, fontsize_row = 7, fontsize_col = 8,
+         cluster_cols = FALSE, main = "Top HIGH-priority samples x disease markers (INT)")
+```
+
+# Disease-signature panels {.tabset}
+
+Each tab lists the top samples for one signature, ranked by panel score. Read
+`top_extreme` for the markers driving each row; mind `frac_hemo_high` /
+`HBA1_INT` for hemolysis and `review`-style caveats in the full shortlist.
+
+```{r panels-tabs, results='asis'}
+panel_clin <- list(
+  ALS_MND = "High neurofilament (NEFL/NEFH) + TDP-43 species. In a non-ALS participant, very high neurofilament still flags active neurodegeneration / recent injury.",
+  Synucleinopathy = "High oligomeric / pSer129 alpha-synuclein (+ DDC, PARK7). Suggests Parkinson's / Lewy-body co-pathology. (Total SNCA is excluded — it is hemolysis-prone.)",
+  AD_tau = "High phospho-tau. Most informative when the person is YOUNG or clinically NCI (pre-symptomatic / discordant AD).",
+  Amyloid_low = "Low A42/A40 ratio — the classic brain-amyloid-deposition signal; in NCI this is a preclinical-AD candidate.",
+  BD_pTau_inflation = "Rare inflation of brain-derived (exosome) pTau. A specifically requested signal.",
+  Neuroinflammation = "Many acute-phase / pro-inflammatory markers high together — possible intercurrent infection / systemic illness at draw.",
+  Neurodegeneration = "Global GFAP + neurofilament elevation (astroglial + axonal)."
+)
+for (pn in names(PANELS)) {
+  sc <- paste0(pn, "_score"); nh <- paste0(pn, "_nhit")
+  tab <- master[!is.na(master[[sc]]), ]
+  tab <- tab[order(-tab[[sc]]), ]
+  tab <- head(tab[, intersect(c("SAMPLE","dataset","CDX_collapsed","age_at_subject","sex",
+                                sc, nh, "top_extreme","HBA1_INT","frac_hemo_high","priority"),
+                              names(tab))], 20)
+  cat(sprintf("\n\n## %s\n\n", pn))
+  cat(sprintf("*%s*\n\n", panel_clin[[pn]]))
+  cat(knitr::kable(tab, format = "html", row.names = FALSE,
+                   table.attr = 'class="table table-striped table-sm"'), "\n\n")
+}
+```
+
+# Rare lone-marker extremes
+
+Single markers at the very edge of the cohort (`|INT|` ≥ `r params$lone_int_thr`,
+≈ top/bottom 0.1%), in the disease direction, not hemolysis-driven. A clinician
+may recognise a specific condition behind one of these (e.g. an isolated very
+high GDF15, CHIT1, or a tau marker).
+
+```{r lone-extremes}
+ddir <- disease_direction_map(PANELS)
+lone <- long_ext %>%
+  filter(Biomarker %in% names(ddir), !hemolysis_sensitive) %>%
+  mutate(oriented_INT = INT * ddir[Biomarker]) %>%
+  filter(oriented_INT >= params$lone_int_thr) %>%
+  left_join(master[, c("SAMPLE","CDX_collapsed","age_at_subject","dataset","priority")], by = "SAMPLE") %>%
+  arrange(desc(oriented_INT)) %>%
+  transmute(SAMPLE, Biomarker, direction, INT, robust_z, value, percentile,
+            CDX = CDX_collapsed, age = round(age_at_subject,1), dataset, priority)
+dt(lone, caption = sprintf("%d rare lone disease-marker extremes", nrow(lone)), pageLength = 12)
+```
+
+# Full clinician shortlist
+
+All `r nrow(short)` flagged samples. Sort by `priority`, then `review_reason`.
+Use the CSV (`output_files/clinician_review_shortlist.csv`) for the complete set
+of columns (panel scores, IDs, run/bay, ancestry, APOE).
+
+```{r shortlist-table}
+show <- short %>%
+  transmute(SAMPLE, priority, dataset, CDX = CDX_collapsed, age = round(age_at_subject,1), sex,
+            n_extreme_total, max_abs_INT, pathology_axes, best_panel_score,
+            review_reason, review_caveat, ID2, RUN)
+dt(show, pageLength = 15)
+```
+
+# Caveats & limitations {-}
+
+- **Relative, not diagnostic.** NPQ values are relative protein levels on one
+  platform. A flag is a *prompt to look*, not a diagnosis.
+- **Hemolysis.** Twelve markers leak from red cells; rows with high `HBA1_INT` or
+  `frac_hemo_high` carry a caveat — discount leakage-sensitive hits there.
+- **APOE4 Bay1 run** (`20251124-1407_Bay1`) has a known APOE4 assay anomaly;
+  APOE4/APOE are excluded from the screen and that run is noted on any flagged row.
+- **Global outliers** (≥8 markers extreme) may be technically poor samples rather
+  than very ill people — check sample quality first.
+- **Repeats.** The dataset is already reduced to the most-recent visit per subject.
+- Thresholds (`thr_int`, panel cut-offs) are report parameters — re-knit with
+  different values to widen or tighten the net.
+
+```{r manifest, echo=FALSE, results='asis'}
+cat("\n**Outputs written to `", OUT, "/`:**\n\n", sep = "")
+for (f in c("clinician_review_shortlist.csv","extreme_sample_master.csv",
+            "extreme_marker_long.csv","extreme_reference_stats.csv"))
+  cat(sprintf("- `%s`\n", f))
+```
