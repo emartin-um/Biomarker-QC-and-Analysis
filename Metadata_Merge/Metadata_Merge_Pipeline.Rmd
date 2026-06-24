@@ -765,13 +765,16 @@ if (!FILTER_ONLY) {
 if (!FILTER_ONLY) {
   cat("\n## Implausible Values\n\n")
 
-  # Column names are weight_lb / height_inches (imperial), not weight/height — the old
-  # metric keys silently skipped these checks (the `if (var %in% names(...))` guard below).
+  # NOTE: implausible values here FEED SAMPLE EXCLUSION (not report-only). weight/height are
+  # intentionally NOT checked: the columns are weight_lb/height_inches (so the metric keys below are
+  # inert by design), and weight/height are non-covariate fields where an implausible value (e.g. a
+  # 47.9-lb data-entry typo) should be flagged for metadata review — NOT cause the whole sample (with
+  # valid biomarker data) to be dropped. Only age/BMI implausibles exclude.
   plausible_ranges <- list(
     age_at_subject = c(18, 110),
     BMI = c(10, 80),
-    weight_lb = c(60, 660),
-    height_inches = c(39, 96)
+    weight = c(30, 300),
+    height = c(100, 250)
   )
 
   implausible_list <- list()
