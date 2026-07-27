@@ -24,6 +24,10 @@ BASE <- if (length(args)) args[1] else file.path(OUT, "_pre_intensity_cols_2026J
 
 NEW_COLS <- c("mean_INT", "mean_INT_z", "intensity_flag",
               "global_outlier_dir", "global_outlier_high", "global_outlier_low")
+# Panel scores read against the sample's own level (addendum S11). One per
+# pathology panel; best_panel_score is deliberately excluded (it is a max across
+# panels, not a panel).
+ADJ_SUFFIX <- "_score_adj"
 
 fails <- 0L
 ok <- function(label, cond, detail = "") {
@@ -50,9 +54,24 @@ for (f in c("extreme_sample_master.csv", "clinician_review_shortlist.csv")) {
   m <- read.csv(p, stringsAsFactors = FALSE, check.names = FALSE)
 
   # --- 1. the new columns are present ---------------------------------------
-  ok("all six new columns present", all(NEW_COLS %in% names(m)),
+  ok("all six intensity/direction columns present", all(NEW_COLS %in% names(m)),
      paste("missing:", paste(setdiff(NEW_COLS, names(m)), collapse = ", ")))
   if (!all(NEW_COLS %in% names(m))) next
+
+  # --- panel scores adjusted for the sample's own level (S11) ---------------
+  adj <- grep(paste0(ADJ_SUFFIX, "$"), names(m), value = TRUE)
+  raw <- sub("_adj$", "", adj)
+  ok("every pathology panel has an adjusted counterpart",
+     length(adj) > 0 && all(raw %in% names(m)),
+     sprintf("%d adjusted columns", length(adj)))
+  ok("best_panel_score is NOT adjusted (it is a max, not a panel)",
+     !("best_panel_score_adj" %in% names(m)))
+  if (length(adj)) {
+    bad <- vapply(seq_along(adj), function(i)
+      !isTRUE(all.equal(m[[adj[i]]], round(m[[raw[i]]] - m$mean_INT, 3))), logical(1))
+    ok("each adjusted score = raw score - mean_INT", !any(bad),
+       if (any(bad)) paste("wrong:", paste(adj[bad], collapse = ", ")) else "")
+  }
 
   # --- 2. internal consistency of the direction split -----------------------
   go <- m$global_outlier
@@ -87,6 +106,18 @@ for (f in c("extreme_sample_master.csv", "clinician_review_shortlist.csv")) {
      abs(mean(m$mean_INT_z, na.rm = TRUE)) < 0.05 &&
        abs(stats::sd(m$mean_INT_z, na.rm = TRUE) - 1) < 0.05)
 
+  # --- 4b. adjusting actually removes the intensity loading -----------------
+  # The point of S11. If a panel score still tracks mean_INT as hard after
+  # adjustment as before, the adjustment is not doing its job.
+  if (length(adj) && "Neuroinflammation_score" %in% names(m)) {
+    r0 <- suppressWarnings(cor(m$Neuroinflammation_score, m$mean_INT,
+                               method = "spearman", use = "complete.obs"))
+    r1 <- suppressWarnings(cor(m$Neuroinflammation_score_adj, m$mean_INT,
+                               method = "spearman", use = "complete.obs"))
+    ok("adjustment removes the intensity loading", abs(r1) < abs(r0) / 2,
+       sprintf("Neuroinflammation rho with level: %+.3f -> %+.3f", r0, r1))
+  }
+
   # --- 5. the flag is additive, not a rediscovery ---------------------------
   if (f == "extreme_sample_master.csv") {
     flagged <- !is.na(m$intensity_flag) & nzchar(m$intensity_flag)
@@ -106,8 +137,10 @@ for (f in c("extreme_sample_master.csv", "clinician_review_shortlist.csv")) {
     moved <- shared[!vapply(shared, function(v) isTRUE(all.equal(o[[v]], m[[v]])), logical(1))]
     ok("no pre-existing column changed vs baseline", length(moved) == 0,
        if (length(moved)) paste("changed:", paste(moved, collapse = ", ")) else "")
-    ok("the only added columns are the six", setequal(setdiff(names(m), names(o)), NEW_COLS),
-       paste("added:", paste(setdiff(names(m), names(o)), collapse = ", ")))
+    added <- setdiff(names(m), names(o))
+    ok("added columns are exactly the intensity set plus the adjusted panels",
+       setequal(added, c(NEW_COLS, grep(paste0(ADJ_SUFFIX, "$"), added, value = TRUE))),
+       paste("added:", paste(added, collapse = ", ")))
   } else {
     cat("  [skip] no baseline at ", b, "\n", sep = "")
   }

@@ -84,5 +84,29 @@ add_intensity_columns <- function(master, int, sd_mult = 2.5) {
   master$global_outlier_dir  <- dir
   master$global_outlier_high <- go & dir == "HIGH"
   master$global_outlier_low  <- go & dir == "LOW"
+
+  # --- 3. panel scores read against the sample's own level (addendum §11) -----
+  # Every pathology panel scores as the MEAN ORIENTED INT across its markers, and
+  # six of the seven orient every marker +1 (the seventh orients both -1). Sign
+  # balance is therefore ±1.00 for all seven — the maximum possible exposure to a
+  # common shift. Measured against the background factor: AD_tau 0.64,
+  # BD_pTau_inflation 0.67, Neuroinflammation 0.64, Neurodegeneration 0.52.
+  #
+  # Because they all load the same way, a bright sample drifts up on ALL of them
+  # together — so apparent MULTI-AXIS pathology is the specific pattern this
+  # artifact produces, and n_pathology_axes is the field most exposed to it.
+  # Subtracting the sample's own level asks what a reviewer actually wants to
+  # know: is this axis raised RELATIVE TO THIS SPECIMEN?
+  #
+  # Raw scores are left untouched; these are additional columns.
+  #
+  # `best_panel_score` is deliberately EXCLUDED: it is a max across panels, not a
+  # panel, so `best_panel_score - mean_INT` is not the same thing as "the best of
+  # the adjusted scores" and would quietly mislead. Take the max over the *_adj
+  # columns if you want that.
+  sc <- setdiff(grep("_score$", names(master), value = TRUE), "best_panel_score")
+  sc <- sc[vapply(master[sc], is.numeric, logical(1))]
+  for (s in sc) master[[paste0(s, "_adj")]] <- round(master[[s]] - mi, 3)
+
   master
 }
