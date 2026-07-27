@@ -328,6 +328,29 @@ build_master <- function(int, meta, panel_scores, thr_int = 2.75) {
   master$apoe4_bay1_flag <- if ("RUN" %in% names(meta)) meta$RUN == APOE4_BAY1_RUN else FALSE
   master$age_young        <- !is.na(master$age_at_subject) & master$age_at_subject < 60
   master$global_outlier   <- master$n_extreme_total >= 8    # very sick OR bad sample
+
+  # Whole-sample intensity, and the direction of the global-outlier call.
+  # Defined once in intensity_columns.R (base R, file-free) so the headless
+  # backfill script shares the definition rather than restating it.
+  # See the 2026-07-27 addendum, §9 and §10.
+  #
+  # Self-locating on purpose: callers (run_extreme_screen.R, Extreme_Value_Screen.Rmd,
+  # or an interactive session) should not each need an extra source() line. We
+  # look where the sibling module realistically is, and fail loudly only if it
+  # genuinely is not there — never emit a master silently missing the columns.
+  if (!exists("add_intensity_columns", mode = "function")) {
+    cand <- c(if (exists("HERE", envir = globalenv()))
+                file.path(get("HERE", envir = globalenv()), "intensity_columns.R"),
+              "intensity_columns.R",
+              file.path("Secondary_QC", "Extremes", "intensity_columns.R"))
+    hit <- Find(function(p) !is.null(p) && file.exists(p), cand)
+    if (is.null(hit))
+      stop("build_master(): cannot find intensity_columns.R, which defines ",
+           "add_intensity_columns(). It must sit beside extreme_helpers.R. ",
+           "(2026-07-27 addendum, S9-S10)")
+    source(hit, local = FALSE)
+  }
+  master <- add_intensity_columns(master, int)
   master
 }
 
@@ -481,8 +504,20 @@ annotate_master <- function(master, long_ext, panels = PANELS, panel_score_thr =
   cav <- ifelse((master$frac_hemo_high >= 0.5 & master$n_extreme_high >= 3) |
                   (!is.na(master$HBA1_INT) & master$HBA1_INT >= 2.75),
                 "CAVEAT: high hemolysis (HBA1/RBC markers) - discount leakage-sensitive hits", cav)
-  cav <- ifelse(master$global_outlier,
-                trimws(paste(cav, "| CAVEAT: global outlier (>=8 markers) - check sample quality")), cav)
+  # Global outlier, WITH its direction: a high-driven and a low-driven outlier
+  # are opposite specimens and a reviewer needs to know which one this is.
+  # High-driven usually means a bright sample (see intensity_columns.R).
+  go_txt <- ifelse(master$global_outlier_dir == "HIGH",
+                   "| CAVEAT: global outlier, HIGH-driven (>=8 markers extreme, mostly high) - reads bright across the panel; check sample quality and discount same-signed panel scores",
+            ifelse(master$global_outlier_dir == "LOW",
+                   "| CAVEAT: global outlier, LOW-driven (>=8 markers extreme, mostly low) - reads dim across the panel; check sample quality",
+                   "| CAVEAT: global outlier (>=8 markers extreme, both tails) - check sample quality"))
+  cav <- ifelse(master$global_outlier, trimws(paste(cav, go_txt)), cav)
+  # Whole-sample intensity, independent of whether any single marker is extreme.
+  cav <- ifelse(!is.na(master$intensity_flag) & master$intensity_flag == "HIGH",
+                trimws(paste(cav, "| NOTE: whole-panel intensity high (mean_INT >= +2.5 SD) - same-signed panel scores are inflated for this sample")), cav)
+  cav <- ifelse(!is.na(master$intensity_flag) & master$intensity_flag == "LOW",
+                trimws(paste(cav, "| NOTE: whole-panel intensity low (mean_INT <= -2.5 SD)")), cav)
   cav <- ifelse(master$apoe4_bay1_flag,
                 trimws(paste(cav, "| NOTE: Bay1 APOE4-anomaly run")), cav)
   master$review_caveat <- trimws(gsub("^\\| ", "", cav))

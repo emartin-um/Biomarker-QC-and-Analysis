@@ -28,6 +28,7 @@ DATA_DIR <- file.path(RUN_ROOT, "datasets")
 OUT_DIR  <- file.path(HERE, "output_files")
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 
+source(file.path(HERE, "intensity_columns.R"))   # must precede the helpers
 source(file.path(HERE, "extreme_helpers.R"))
 
 # --- thresholds (tunable; INT = rank-based inverse-normal, ~standard-normal) --
@@ -85,7 +86,13 @@ cat(sprintf("Extreme events (|INT|>=%g): %d across %d distinct samples\n",
             THR_INT, nrow(long_ext), length(unique(long_ext$SAMPLE))))
 cat(sprintf("Samples with >=1 extreme: %d (%.1f%%)\n",
             sum(master$n_extreme_total > 0), 100*mean(master$n_extreme_total > 0)))
-cat(sprintf("Global outliers (>=8 markers extreme): %d\n", sum(master$global_outlier)))
+cat(sprintf("Global outliers (>=8 markers extreme): %d  (high-driven %d, low-driven %d, mixed %d)\n",
+            sum(master$global_outlier), sum(master$global_outlier_high),
+            sum(master$global_outlier_low),
+            sum(master$global_outlier & master$global_outlier_dir == "MIXED")))
+cat(sprintf("Whole-sample intensity (mean_INT) beyond +/-2.5 SD: %d HIGH, %d LOW  [informational]\n",
+            sum(master$intensity_flag == "HIGH", na.rm = TRUE),
+            sum(master$intensity_flag == "LOW",  na.rm = TRUE)))
 cat(sprintf("Clinician shortlist: %d samples (HIGH=%d, MEDIUM=%d)\n",
             nrow(short), sum(short$priority == "HIGH"), sum(short$priority == "MEDIUM")))
 cat("\n-- shortlist by dataset --\n");      print(table(short$dataset))
