@@ -72,6 +72,23 @@ Utility library sourced automatically by the pipeline. Provides config-driven fu
 | `validate_groups(data, cols, min_n)` | Check final group sizes against a minimum threshold |
 | `print_config(config)` | Pretty-print a config for review |
 
+### `Cohort_Accounting/`
+Per-well exit reasons and the standing cohort-loss accounting — implements
+`QC_PIPELINE_RECOMMENDATIONS_2026-07-13.md` §1 and §4. Run it **after** the
+pipeline; it reads the pipeline's outputs, removes nothing and changes nothing.
+
+Every attempted patient well gets exactly one exit reason, so **"missing from the
+analysis set" stops reading as "failed QC"** — on the 50-plate run those are
+11.9% and 88.1% of the loss respectively. `Cohort_Accounting/README.md` has the
+full taxonomy and the verified chain; the short version is that its
+`per_plate_QC_and_cohort_summary.csv` carries the QC and cohort columns side by
+side and never sums them, and supersedes reading Primary QC's
+`per_plate_QC_summary.csv` on its own.
+
+```bash
+cd Cohort_Accounting && Rscript run_cohort_accounting.R && Rscript test_cohort_accounting.R
+```
+
 ---
 
 ## Pipeline Steps
@@ -325,6 +342,21 @@ Metadata_Merge/{output_dir}/
 ### Covariate-Driven Exclusions (Step 6, when `filter_na_covars = true`)
 - CDX values not mapped by `dx_config` (e.g., `"0"`, `"Other"`, `"Insufficient Data"`)
 - Group/Race/Ethnicity combinations not matched by any `ancestry_config` rule
+
+> **Note — a CDX value absent from `CDX_review.csv` entirely is dropped too,** by
+> the same `is.na()` test as a deliberately excluded one. `apply_category_config()`
+> warns about these "unaccounted" levels, but the Step 6d chunk sets
+> `warning: false`, so in the rendered report a new CDX spelling drops its samples
+> with no visible signal. `Cohort_Accounting/` names any such value in its console
+> summary.
+
+### Counting what these exclusions cost
+This section says *which* rules drop rows; it does not say **how many, whose, or
+compared with what**. That is `Cohort_Accounting/` — attempted → in-cohort with
+one exit reason per well and cuts by year, site and ancestry. On the 50-plate run
+the covariate-driven exclusions above are the single largest category of loss in
+the whole pipeline (361 wells on diagnosis, against 77 for all of Primary QC),
+which is not visible from the exclusion logic alone.
 
 ---
 
