@@ -1885,11 +1885,11 @@ Filtered datasets are ready for downstream analysis in `output_files/filtered/`.
 
 ## Next Steps
 
-To manually edit exclusions and re-run filtering: 1. Open `output_files/sample_exclusion_report.csv` 2. Change `exclude` column as needed 3. Re-render this document with `filter_only: true`:
+To manually edit exclusions and re-run filtering: 1. Open `output_files/sample_exclusion_report.csv` 2. Change the `exclude` column — **`TRUE` drops the sample, `FALSE` keeps it** (rows flagged for review are written as `FALSE`, i.e. kept) 3. Re-render this document with `filter_only: true`:
 
 ``` r
-quarto::quarto_render("Metadata_Merge_Pipeline.qmd",
-                      execute_params = list(filter_only = TRUE))
+rmarkdown::render("Metadata_Merge_Pipeline.Rmd",
+                  params = list(filter_only = TRUE))
 ```
 
 ---

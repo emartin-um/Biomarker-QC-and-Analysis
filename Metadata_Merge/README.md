@@ -364,11 +364,14 @@ which is not visible from the exclusion logic alone.
 
 1. Run the full pipeline first
 2. Open `output_files/sample_exclusion_report.csv`
-3. Change `exclude` column: `TRUE` to keep a flagged sample, `FALSE` to exclude one
+3. Change the `exclude` column: **`TRUE` drops the sample, `FALSE` keeps it.** Rows merely flagged
+   for review are written with `exclude = FALSE` (kept) — set one to `TRUE` to act on the flag, and
+   leave it `FALSE` to keep the sample. Step 5 collects the `exclude == TRUE` rows into
+   `samples_to_exclude` and filters them out of the merged datasets.
 4. Re-render in filter-only mode:
    ```r
-   quarto::quarto_render("Metadata_Merge_Pipeline.qmd",
-                         execute_params = list(filter_only = TRUE))
+   rmarkdown::render("Metadata_Merge_Pipeline.Rmd",
+                     params = list(filter_only = TRUE))
    ```
 
 ---
