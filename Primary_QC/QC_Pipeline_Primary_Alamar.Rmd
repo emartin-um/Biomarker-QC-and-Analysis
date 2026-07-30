@@ -27,9 +27,27 @@ This protocol describes a workflow for primary **quality control (QC)** of bioma
 
 * All biomarkers are then reintegrated, but separated into two sets: 1) those with low detectability and/or low read count, and 2) all remaining biomarkers.
 
-* Finally, post-QC NPQ data are written to output files, separated by the two biomarker groups as well as triaged and non-triaged samples. 
+* Finally, post-QC NPQ data are written to output files, separated by the two biomarker groups as well as triaged and non-triaged samples.
 
 QC analyses are **agnostic** to phenotypic and covariate information.
+
+**Two sections audit the pipeline rather than the samples** (added 2026-07-30,
+implementing the recommendations in `Secondary_QC/Triage_Review/`):
+
+* **D.0** measures **whole-panel intensity** (`mean_INT`) on every well *before*
+  triage. Every gate below asks a count or distance question; none asks a level
+  question, so a sample that reads uniformly bright across the panel is invisible
+  to all of them. `mean_INT` makes that axis visible. It is **reported, never
+  gated** — it is a covariate for the analysis model, not a drop rule.
+
+* **D.5** audits the screens themselves: does each gate fire or is it **inert**,
+  is it independent of the others or a vendor metric re-derived, where does its
+  cut sit on its own statistic, and is it keying on **plate position** rather
+  than on the specimen. Diagnostic only — it removes nothing.
+
+Both are why several gates below now report *headroom to the cut* alongside a
+count. A gate that fired on zero wells has not been shown to be safe; it has not
+been tested, and the two look identical from the count alone.
 
 **For a new QC run**, set the NPQ input filename in section A.3 (and optionally the title in YAML). You **no longer need to rename this file** — the `knit:` function in the YAML header auto-names the HTML after the NPQ input dataset (e.g. `QC_Pipeline_Primary_Alamar_NPQ_20251220.html`), so each run's report is unique and won't overwrite a previous one.
 
@@ -60,6 +78,26 @@ QC analyses are **agnostic** to phenotypic and covariate information.
 5. Additional ancillary files for outliers, PCA coordinates, flagged samples, etc.
 6. I'd like to add a pdf summary to export with final data.
 
+**Audit and covariate outputs** (D.0 and D.5 — none of these drop a sample):
+
+| file | what it answers |
+|---|---|
+| `well_level_QC.csv` | **one row per well**: every gate flag, `mean_INT`, position, reads, IC. The join key for anything downstream — above all clustering by *clinical collection site*, which needs the metadata merge |
+| `whole_panel_intensity.csv` | `mean_INT` / `mean_INT_z` for all wells, triaged included |
+| `qc_gate_inventory.csv` | does each gate fire, or is it **INERT** (untested, not proven safe), and how much headroom to its cut |
+| `qc_gate_duplication.csv` | is our IC gate the vendor's `IC Median` re-derived (Jaccard + verdict) |
+| `qc_gate_overlap.csv` | pairwise Jaccard between screens — which ones are one screen reported twice |
+| `triage_axis_overlap.csv` | true per-axis totals vs what a one-reason-per-well report shows |
+| `triage_axis_combinations.csv` | the full Venn, flattened |
+| `burden_operating_points.csv` | the complete list of `FDR_threshold` settings that exist — it is not a dial |
+| `gate_cut_neighbourhood.csv` | nearest retained and nearest removed well on each axis |
+| `read_gate_geometry.csv` | per plate-bay, whether the lower read bound is plate-relative or the absolute floor |
+| `qc_axis_attribution.csv` | each triage class on the intensity axis (d, AUC) — **per class, never pooled** |
+| `well_position_effects.csv` | per-position triage rates + permutation p |
+| `well_position_effects_readflag.csv` | the same for read flags |
+| `position_map_IC.csv` | median IC recovery by plate position |
+| `ic_row_gradient.csv` | IC recovery down the plate, per plate-bay |
+
 
 ## A.2 Thresholds
 
@@ -73,9 +111,13 @@ Adjustable QC parameters include:
 | `read_count_threshold` | 500 | Minimum mean/median raw reads per sample for QC |
 | `corr_thresh` | 0.4 | Maximum correlation coefficient allowed between biomarkers in QC Biomarker dataset |
 | `samp_out_thresh` | 1.5 | Multiplier for IQR to determine if a sample if an outlier from the median NPQ for a biomarker|
-| `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample if an outlier from the median for Total Reads|
+| `read_out_thresh` | 4 | Multiplier for IQR to determine if a sample is a **high**-read outlier from the plate median |
+| `read_floor_abs` | 500000 | Absolute low-read floor. The **only** lower read bound — see D.2.4 for why a plate-relative one cannot work |
 | `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
 | `scaffold_mode` | `"frozen"` | QC Biomarker Set selection: `"frozen"` (fixed 21-anchor scaffold + per-plate tripwire) or `"rederive"` (per-run derive + de-correlate). Changes only the sample-triage anchors, not output biomarker content. |
+| `intensity_sd_flag` | 2.5 | SDs of `mean_INT_z` for the whole-panel intensity flag. **Informational only — never triages** (D.0) |
+| `ic_median_thresh` | 0.40 | Alamar's own `IC Median` bar, used in D.2.3 to test whether our IC gate is a re-derivation of it |
+| `n_perm` | 10000 | Permutation replicates for the plate-position tests in D.5.4 |
 
 
 ## A.3 Initial Setup 
@@ -99,6 +141,25 @@ read_count_threshold <- 500
 samp_out_thresh <- 1.5
 read_out_thresh <- 4
 FDR_threshold <- 0.01
+
+# Absolute low-read floor. Kept as a NAMED constant rather than buried in a pmax()
+# because it is the only lower read bound this pipeline has — see D.2.4.
+read_floor_abs <- 500000
+
+# Whole-panel intensity (D.0). INFORMATIONAL. `mean_INT` is a level statistic and
+# is deliberately NOT a gate: background intensity is a continuous nuisance
+# covariate affecting every sample, not a population of bad wells. It belongs in
+# the downstream analysis model. The flag exists to make the axis visible.
+intensity_sd_flag <- 2.5
+
+# Alamar's own IC bar (|IC Median| > 0.40 = outside +/-40% of the plate median).
+# Used in D.2.3 to measure how far our IC gate is an independent check.
+ic_median_thresh <- 0.40
+
+# Permutation replicates for the plate-position tests (D.5.4). Triage counts over
+# 84-96 positions leave most cells at 0 or 1, where a chi-square is not
+# conservative but wrong.
+n_perm <- 10000
 
 # QC Biomarker Set (scaffold) selection — how the markers used for SAMPLE triage are chosen.
 #   "frozen"   : (default) a fixed, pre-vetted, de-correlated anchor set (stable across batches) + a
@@ -162,6 +223,72 @@ if (is.na(.sqc_skip)) {
 alamar_qc <- read_csv(.sqc_path, skip = .sqc_skip, show_col_types = FALSE)
 message("Sample_QC.csv: header auto-detected at line ", .sqc_skip + 1L, " (skip=", .sqc_skip, ").")
 
+# --- Vendor thresholds, read from the export instead of hardcoded --------------
+# That preamble we skip over is not noise: it states Alamar's own QC bars, e.g.
+#   Detectability ... (Minimum threshold = plasma-90%, serum-90%, csf-70%, other-0%)
+#   IC Reads      ... (Minimum threshold = 1,000)
+#   Reads         ... (Minimum threshold = 500,000)
+#   IC Median     ... (Within +/-40% of the plate median)
+# Parsing them keeps the audit in D.5.1 correct when Alamar changes a bar, and —
+# more importantly — makes the detectability bar MATRIX-SPECIFIC. A hardcoded 90%
+# silently mis-scores a CSF run, where the vendor bar is 70%.
+# Match on the metric NAME at the start of its own preamble row, not on the
+# joined text: "reads within a sample" appears in both the `Reads` row and the
+# `IC Reads` row ("...(IC) reads within a sample..."), so a blob-wide search
+# returns the IC bar of 1,000 for `Reads` instead of 500,000.
+.pre <- .sqc_peek[seq_len(max(1L, .sqc_skip))]
+.metric_line <- function(nm) {
+  i <- grep(paste0('^\\s*"?', nm, '"?\\s*,'), .pre, perl = TRUE)
+  if (length(i)) .pre[i[1]] else NA_character_
+}
+.thresh <- function(nm, default) {
+  ln <- .metric_line(nm); if (is.na(ln)) return(default)
+  m <- regmatches(ln, regexpr("Minimum threshold\\s*=\\s*([0-9,]+)", ln, perl = TRUE))
+  if (!length(m)) return(default)
+  v <- suppressWarnings(as.numeric(gsub("[^0-9]", "", m)))
+  if (is.na(v)) default else v
+}
+vendor_thresholds <- list(ic_reads_min = .thresh("IC Reads", 1000),
+                          reads_min    = .thresh("Reads", 500000))
+
+.icm <- .metric_line("IC Median")
+vendor_thresholds$ic_median <- if (!is.na(.icm)) {
+  m <- regmatches(.icm, regexpr("\\+/-\\s*([0-9.]+)\\s*%", .icm, perl = TRUE))
+  if (length(m)) as.numeric(gsub("[^0-9.]", "", m)) / 100 else 0.40
+} else 0.40
+
+# Detectability bar per sample matrix, from the same row.
+.dln <- .metric_line("Detectability")
+.det <- if (!is.na(.dln))
+  regmatches(.dln, gregexpr("([A-Za-z]+)\\s*-\\s*([0-9.]+)\\s*%", .dln, perl = TRUE))[[1]] else character(0)
+vendor_thresholds$detectability_by_matrix <- if (length(.det)) {
+  stats::setNames(as.numeric(sub("^.*-\\s*([0-9.]+)\\s*%$", "\\1", .det)) / 100,
+                  toupper(sub("^\\s*([A-Za-z]+)\\s*-.*$", "\\1", .det)))
+} else c(PLASMA = 0.90, SERUM = 0.90, CSF = 0.70, OTHER = 0)
+
+# Resolve the bar for THIS run from its own SAMPLE_MATRIX column.
+.mx <- if ("SAMPLE_MATRIX" %in% names(alamar_qc))
+  toupper(names(sort(table(alamar_qc$SAMPLE_MATRIX), decreasing = TRUE))[1]) else "OTHER"
+vendor_thresholds$sample_matrix <- .mx
+vendor_thresholds$detectability_min <- unname(
+  if (.mx %in% names(vendor_thresholds$detectability_by_matrix))
+    vendor_thresholds$detectability_by_matrix[[.mx]]
+  else vendor_thresholds$detectability_by_matrix[["OTHER"]])
+
+message(sprintf("Vendor bars read from the export: matrix %s, detectability %.0f%%, IC Reads %s, Reads %s, IC Median +/-%.0f%%",
+                .mx, 100 * vendor_thresholds$detectability_min,
+                format(vendor_thresholds$ic_reads_min, big.mark = ","),
+                format(vendor_thresholds$reads_min, big.mark = ",", scientific = FALSE),
+                100 * vendor_thresholds$ic_median))
+
+# The in-house IC gate is a re-derivation of the vendor's IC Median bar (D.2.3),
+# so it should track the vendor's number rather than carry its own copy.
+if (!isTRUE(all.equal(ic_median_thresh, vendor_thresholds$ic_median))) {
+  message(sprintf("ic_median_thresh %.2f differs from the export's +/-%.0f%% -- using the export's.",
+                  ic_median_thresh, 100 * vendor_thresholds$ic_median))
+  ic_median_thresh <- vendor_thresholds$ic_median
+}
+
 .sqc_miss <- setdiff(c("plateID", "Sample Name", "QC Status"), names(alamar_qc))
 if (length(.sqc_miss))
   stop("Sample_QC.csv is missing expected column(s): ", paste(.sqc_miss, collapse = ", "),
@@ -194,6 +321,33 @@ combined_df$Run <- meta_df$Run
 combined_df$Bay <- meta_df$Bay
 combined_df <- combined_df %>% select(Run, Bay, everything())
 rownames(combined_df) <- rownames(combined_t)
+
+# --- Plate position lookup -----------------------------------------------------
+# Kept as a SEPARATE lookup rather than extra columns on combined_df, because the
+# whole pipeline addresses biomarker columns positionally (`combined_df[, -(1:2)]`)
+# and widening the metadata block would silently shift those.
+#
+# Position is a technical property of the plate, not phenotype, so using it here
+# does not break the "QC is agnostic to phenotypic and covariate information" rule
+# in A. Clustering by *clinical collection site* is a different question and needs
+# the metadata merge — it lives in Secondary_QC, fed by the well-level table D.5.6
+# writes. See D.5.4.
+well_pos <- alamar_qc %>%
+  transmute(
+    SampleID = `Sample Name`,
+    Run      = stringr::str_extract(plateID, "^[0-9]{8}-[0-9]{4}"),
+    Bay      = stringr::str_extract(plateID, "Bay[0-9]+"),
+    Well     = if ("AUTO_WELLPOSITION" %in% names(.)) as.character(AUTO_WELLPOSITION)
+               else paste0(wellRow, wellCol),
+    wellRow  = as.character(wellRow),
+    wellCol  = suppressWarnings(as.integer(wellCol))
+  ) %>%
+  filter(!is.na(SampleID)) %>%
+  distinct(SampleID, .keep_all = TRUE)
+
+if (all(is.na(well_pos$Well)))
+  warning("No usable well position in Sample_QC.csv (need AUTO_WELLPOSITION, or wellRow+wellCol). ",
+          "The plate-position diagnostics in D.5.4 will be skipped.")
 ```
 
 ## B.1 Initial Cleaning
@@ -535,6 +689,93 @@ if (identical(scaffold_mode, "frozen")) {
 
 # D. Sample QC
 
+## D.0 Whole-Panel Intensity (`mean_INT`) — measured, never gated
+
+Every screen below asks a **count** question ("on how many markers is this sample
+extreme?") or a **distance** question ("how far is it from the plate centre?").
+None asks a **level** question. A sample that reads moderately high on *all* 131
+markers at once is therefore invisible to all of them: the outlier-burden test
+counts markers outside a per-plate IQR fence in either direction, so a uniform
+shift never makes any single marker extreme. That is structural, not a threshold
+that can be loosened.
+
+`mean_INT` is that missing level question. Each marker is put on a rank-based
+inverse-normal scale, so every marker contributes on the same footing, and the
+per-sample mean is directly readable as *how bright does this sample run across
+the panel*.
+
+> ⚠️ **This is a covariate, not a gate.** Background intensity is continuous and
+> affects every sample; it is not a population of bad wells. Nothing here triages
+> or flags a sample out of the dataset. `mean_INT` is computed for **all** wells
+> — including those about to be triaged — written to the outputs, and intended
+> for the downstream analysis model. Gating on it would remove real biological
+> and technical variation that belongs in the model.
+
+It is computed **before** triage on purpose. Run downstream, it can only ever see
+retained wells, so removed wells have no intensity value and cannot be placed on
+the axis at all.
+
+```{r whole-panel-intensity, message=FALSE, warning=FALSE, echo=TRUE}
+# Rank-based inverse-normal transform, per marker, over all wells present here.
+# Same definition as Secondary_QC/Extremes/intensity_columns.R — there must be one
+# definition of this column, or two files will disagree about the same sample.
+int_scores <- function(v) {
+  v  <- suppressWarnings(as.numeric(v))
+  ok <- !is.na(v)
+  out <- rep(NA_real_, length(v))
+  n <- sum(ok)
+  if (n >= 2) out[ok] <- stats::qnorm((rank(v[ok], ties.method = "average") - 0.5) / n)
+  out
+}
+
+int_markers <- names(combined_df)[vapply(combined_df, is.numeric, logical(1))]
+int_markers <- setdiff(int_markers, c("Run", "Bay"))
+
+int_mat <- vapply(int_markers, function(b) int_scores(combined_df[[b]]),
+                  numeric(nrow(combined_df)))
+rownames(int_mat) <- rownames(combined_df)
+
+mi <- rowMeans(int_mat, na.rm = TRUE)
+mi[!is.finite(mi)] <- NA_real_
+.sd_mi <- stats::sd(mi, na.rm = TRUE)
+
+intensity_df <- tibble(
+  SampleID  = rownames(combined_df),
+  Run       = combined_df$Run,
+  Bay       = combined_df$Bay,
+  mean_INT  = round(mi, 3),
+  # Round BEFORE deriving the flag, so the flag agrees with the value that is
+  # actually written out (a boundary sample at z = -2.4996 otherwise prints
+  # "-2.50" while not carrying the LOW flag).
+  mean_INT_z = if (is.finite(.sd_mi) && .sd_mi > 0)
+                 round((mi - mean(mi, na.rm = TRUE)) / .sd_mi, 2) else NA_real_
+) %>%
+  mutate(intensity_flag = case_when(
+    is.na(mean_INT_z)                 ~ NA_character_,
+    mean_INT_z >=  intensity_sd_flag  ~ "HIGH",
+    mean_INT_z <= -intensity_sd_flag  ~ "LOW",
+    TRUE                              ~ ""
+  ))
+
+write_csv(intensity_df, "output_files/whole_panel_intensity.csv")
+
+cat(sprintf("mean_INT over %d wells x %d markers (pre-triage, so triaged wells are included)\n",
+            nrow(intensity_df), length(int_markers)))
+cat(sprintf("Informational flags at +/-%.1f SD: %d HIGH, %d LOW  — neither triages nor flags a sample.\n",
+            intensity_sd_flag,
+            sum(intensity_df$intensity_flag == "HIGH", na.rm = TRUE),
+            sum(intensity_df$intensity_flag == "LOW",  na.rm = TRUE)))
+
+ggplot(intensity_df, aes(x = mean_INT_z)) +
+  geom_histogram(bins = 60, fill = "steelblue", colour = "white", linewidth = 0.2) +
+  geom_vline(xintercept = c(-intensity_sd_flag, intensity_sd_flag),
+             linetype = "dashed", colour = "grey30") +
+  theme_minimal() +
+  labs(title = "Whole-panel intensity across all wells (pre-triage)",
+       subtitle = "Dashed lines are the informational flag, not a cut — nothing is removed on this axis",
+       x = "mean_INT_z", y = "Wells")
+```
+
 ## D.1 Alamar Sample QC
 Gather the Alamar sample QC statistics and identify samples with "warning".
 
@@ -608,12 +849,20 @@ pca_df <- pca_df %>%
     PC_dist = sqrt(PC1^2 + PC2^2),
     mean_PCdist = mean(PC_dist, na.rm = TRUE),
     sd_PCdist   = sd(PC_dist, na.rm = TRUE),
-    extreme_outlier = PC_dist > (mean_PCdist + PCA_SD * sd_PCdist)
+    # The statistic the cut is actually applied to. Written out so the operating
+    # point is auditable: "how close did the nearest retained well get?" cannot be
+    # answered from a boolean.
+    PC_z = (PC_dist - mean_PCdist) / sd_PCdist,
+    extreme_outlier = PC_z > PCA_SD
   ) %>%
   ungroup()
 
 extreme_samples_round1 <- pca_df$Sample[pca_df$extreme_outlier]
 write_csv(pca_df, "output_files/sample_pca_coordinates_round1.csv")
+
+cat(sprintf("Round 1: %d of %d wells beyond %g SD.  max PC_z = %.3f (headroom %+.3f)\n",
+            length(extreme_samples_round1), nrow(pca_df), PCA_SD,
+            max(pca_df$PC_z, na.rm = TRUE), max(pca_df$PC_z, na.rm = TRUE) - PCA_SD))
 
 # Variance explained
 var_explained <- summary(pca_res)$importance["Proportion of Variance", 1:2] * 100
@@ -663,7 +912,8 @@ if (length(extreme_samples_round1) > 0) {
     PC_dist = sqrt(PC1^2 + PC2^2),
     mean_PCdist = mean(PC_dist, na.rm = TRUE),
     sd_PCdist   = sd(PC_dist, na.rm = TRUE),
-    extreme_outlier = PC_dist > (mean_PCdist + PCA_SD * sd_PCdist)
+    PC_z = (PC_dist - mean_PCdist) / sd_PCdist,
+    extreme_outlier = PC_z > PCA_SD
   ) %>%
   ungroup()
 
@@ -671,6 +921,16 @@ if (length(extreme_samples_round1) > 0) {
   # Identify new outliers
   extreme_samples_round2 <- pca_df2$Sample[pca_df2$extreme_outlier]
   write_csv(pca_df2, "output_files/sample_pca_coordinates_round2.csv")
+
+  # Round 2 is the pass most likely to be inert: removing round-1 outliers pulls
+  # the remaining wells together, and if nothing then reaches PCA_SD the second
+  # pass has added nothing on this run. Say so rather than letting a silent "0
+  # new outliers" read as "the second screen confirmed the data are clean".
+  .r2_max <- max(pca_df2$PC_z, na.rm = TRUE)
+  cat(sprintf("Round 2: %d of %d wells beyond %g SD.  max PC_z = %.3f (headroom %+.3f)\n",
+              length(extreme_samples_round2), nrow(pca_df2), PCA_SD, .r2_max, .r2_max - PCA_SD))
+  if (length(extreme_samples_round2) == 0)
+    cat("  -> INERT on this run: the second pass removed nothing. It is UNTESTED, not proven safe.\n")
 
   var_explained2 <- summary(pca_res2)$importance["Proportion of Variance", 1:2] * 100
   pc1_var2 <- round(var_explained2[1], 1)
@@ -698,6 +958,10 @@ if (length(extreme_samples_round1) > 0) {
 
 } else {
   cat("\nNo first-round PCA outliers detected. Skipping second round.\n")
+  # Define these anyway: D.3 and the D.5.1 inventory read them unconditionally,
+  # and an undefined pca_df2 used to abort the run whenever round 1 was clean.
+  pca_df2 <- pca_df[0, ]
+  extreme_samples_round2 <- character(0)
   plot1
 }
 ```
@@ -798,6 +1062,70 @@ knitr::kable(upper_top10, caption = "Top 10 Upper Outliers (Sorted by P-value)")
 
 knitr::kable(lower_top10, caption = "Top 10 Lower Outliers (Sorted by P-value)")
 ```
+
+#### `FDR_threshold` is not a dial
+
+The p-value is Poisson-binomial on an **integer count** of anchor markers, so the
+FDR takes only as many distinct values as there are achievable counts. Moving
+`FDR_threshold` does nothing until it crosses one of them, and then it moves by a
+whole anchor's worth of samples at once. The table below is the complete list of
+settings that exist — anything between two rows is the same QC as the row above.
+
+```{r burden-operating-points, message=FALSE, warning=FALSE, echo=TRUE}
+# A sample is triaged if EITHER tail is significant, so the statistic the cut
+# actually lands on is the per-sample minimum of the two FDRs.
+burden_stat <- tibble(
+  SampleID = upper_df$SampleID,
+  fdr_min  = pmin(upper_df$FDR, lower_df$FDR, na.rm = TRUE),
+  n_out    = upper_df$Total_Outliers + lower_df$Total_Outliers
+)
+
+n_anchor <- ncol(qc_matrix)
+
+op_points <- burden_stat %>%
+  count(fdr_min, name = "wells_here") %>%
+  arrange(fdr_min) %>%
+  mutate(
+    # Guide, not an identity: the two tails carry different BH adjustments, so
+    # the count is not a strict function of the FDR across tails.
+    anchors_out_median = vapply(fdr_min, function(f)
+      stats::median(burden_stat$n_out[burden_stat$fdr_min == f]), numeric(1)),
+    removed_at_this_cut = cumsum(wells_here),
+    is_current_cut = fdr_min < FDR_threshold &
+                     dplyr::lead(fdr_min, default = Inf) >= FDR_threshold
+  )
+
+write_csv(op_points, "output_files/burden_operating_points.csv")
+
+cat(sprintf("`FDR` takes %d distinct values over %d wells; %.1f%% of wells sit at exactly %.4g.\n",
+            nrow(op_points), nrow(burden_stat),
+            100 * max(op_points$wells_here) / nrow(burden_stat),
+            op_points$fdr_min[which.max(op_points$wells_here)]))
+cat(sprintf("Current cut FDR < %g removes %d wells, i.e. \"%.0f or more of %d anchors out\".\n",
+            FDR_threshold, sum(burden_stat$fdr_min < FDR_threshold, na.rm = TRUE),
+            min(burden_stat$n_out[burden_stat$fdr_min < FDR_threshold], na.rm = TRUE), n_anchor))
+
+# Show the neighbourhood of the current cut, where any retuning would happen.
+.i <- which(op_points$is_current_cut)
+.win <- if (length(.i)) seq(max(1, .i - 2), min(nrow(op_points), .i + 3)) else seq_len(min(8, nrow(op_points)))
+knitr::kable(
+  op_points[.win, ] %>%
+    transmute(FDR = signif(fdr_min, 5),
+              `~anchors out` = anchors_out_median,
+              `wells here` = wells_here,
+              `removed at this cut` = removed_at_this_cut,
+              `current` = ifelse(is_current_cut, "<-- current gate", "")),
+  caption = paste0("Available operating points around FDR < ", FDR_threshold,
+                   ". There is nothing to tune between adjacent rows.")
+)
+```
+
+Note also what this gate **cannot** see. The burden count is a **distance**
+statistic: it counts markers outside a per-plate IQR fence, in either direction.
+A sample that is moderately high on every marker at once never makes any single
+marker extreme, so no `FDR_threshold` recovers it. That blind spot is what D.0
+measures — and the reason `mean_INT` is reported rather than added here as a
+gate.
 
 These plots show where the outlier samples fall for the biomarkers. Red are outliers. Blue are points for the same sample where they are not outliers. Only showing plots for samples with FDR< `r FDR_threshold`.
  
@@ -941,16 +1269,112 @@ knitr::kable(
   caption = "mCherry-Read Outliers (Sorted by Reads)"
 )
 
-IC_outlier_samples= df_temp %>% 
+IC_outlier_samples= df_temp %>%
     filter(Outlier_Flag ==TRUE)%>%
     arrange(desc(IC_Reads)) %>%
     select(SampleID)
-  
+
+```
+
+#### Is this an independent check, or Alamar's metric recomputed?
+
+This gate supplies the large majority of all triage, so it is worth being precise
+about what it is. We test `IC Reads` against 0.6–1.4× the plate median. Alamar's
+own `IC Median` column is *defined* as sample IC reads relative to the plate
+median, with a ±40% bar. **Same quantity, same fence.** If the two agree closely,
+this is a re-derivation of a vendor metric — a useful cross-check that the vendor
+value reproduces, but **not** a second, independent line of evidence, and methods
+text should not describe it as in-house QC that independently confirms Alamar's.
+
+```{r ic-gate-duplication, message=FALSE, warning=FALSE, echo=TRUE}
+# Alamar reports IC Median as a proportion (+/-0.40) in current exports, but a
+# percent-scaled export (+/-40) would silently pass every well. Detect the scale
+# instead of assuming it.
+ic_vendor <- alamar_qc %>%
+  transmute(SampleID = `Sample Name`, ic_med = suppressWarnings(as.numeric(`IC Median`))) %>%
+  filter(SampleID %in% df_temp$SampleID)
+
+.ic_scale <- if (stats::quantile(abs(ic_vendor$ic_med), 0.99, na.rm = TRUE) > 5) 100 else 1
+if (.ic_scale == 100)
+  message("IC Median appears to be on a 0-100 percent scale; rescaling to match ic_median_thresh.")
+ic_vendor$ic_med <- ic_vendor$ic_med / .ic_scale
+
+ours   <- df_temp$SampleID[df_temp$Outlier_Flag]
+theirs <- ic_vendor$SampleID[abs(ic_vendor$ic_med) > ic_median_thresh & !is.na(ic_vendor$ic_med)]
+
+.int <- length(intersect(ours, theirs))
+.uni <- length(union(ours, theirs))
+jacc <- if (.uni > 0) .int / .uni else NA_real_
+
+ic_dup <- tibble(
+  in_house_gate   = "IC Reads outside 0.6x-1.4x the Run x Bay median",
+  vendor_metric   = paste0("|IC Median| > ", ic_median_thresh),
+  n_in_house      = length(ours),
+  n_vendor        = length(theirs),
+  n_both          = .int,
+  jaccard         = round(jacc, 3),
+  verdict         = dplyr::case_when(
+    is.na(jacc)   ~ "neither fires",
+    jacc >= 0.90  ~ "DUPLICATE - the vendor metric recomputed, not an independent axis",
+    jacc >= 0.50  ~ "OVERLAPPING - largely the same wells",
+    TRUE          ~ "DISTINCT - the two gates see different wells")
+)
+write_csv(ic_dup, "output_files/qc_gate_duplication.csv")
+knitr::kable(ic_dup %>% select(-in_house_gate, -vendor_metric),
+             caption = "Our IC gate vs Alamar's own IC Median metric")
+cat(sprintf("Verdict: %s (Jaccard %.3f)\n", ic_dup$verdict, jacc))
+
+# The wells the two disagree on are the informative ones — usually boundary cases.
+disc <- ic_vendor %>%
+  filter(SampleID %in% union(setdiff(ours, theirs), setdiff(theirs, ours))) %>%
+  left_join(df_temp %>% select(SampleID, Run, Bay, IC_Reads, Median_Value), by = "SampleID") %>%
+  transmute(SampleID, Run, Bay, IC_Reads,
+            ratio_to_plate_median = round(IC_Reads / Median_Value, 3),
+            `IC Median` = round(ic_med, 4),
+            called_by = ifelse(SampleID %in% ours, "ours only", "Alamar only"),
+            dist_from_vendor_bar = round(abs(abs(ic_med) - ic_median_thresh), 4))
+if (nrow(disc))
+  knitr::kable(arrange(disc, dist_from_vendor_bar),
+               caption = "Wells the two calls disagree on (nearest the bar first)")
+
+# The stated lower guard `IC Reads < 1000`: does it ever bind, given that the
+# plate-relative bound is pmax(0.6 * median, 1000)?
+ic_geom <- df_temp %>%
+  group_by(Run, Bay) %>%
+  summarise(plate_rel_lower = 0.6 * first(Median_Value),
+            floor_binds = plate_rel_lower < 1000, .groups = "drop")
+cat(sprintf("IC lower bound: the 1000 floor binds in %d of %d plate-bays; %d wells fall below 1000 outright.\n",
+            sum(ic_geom$floor_binds), nrow(ic_geom), sum(df_temp$IC_Reads < 1000, na.rm = TRUE)))
 ```
 Note: As expected, the samples with very high reads for mCherry, have lower average NPQ than others.
 
 ### D.2.4 Extreme Matching Reads
-Here we are identifying samples that have extreme numbers of total matching reads, in aggregate, within their plate. These are **flagged** samples. For the lower bound, we use a minimum count of 500,000 if the IQR bound is smaller.
+Here we are identifying samples that have extreme numbers of total matching reads, in aggregate, within their plate. These are **flagged** samples, not triaged.
+
+> **This gate is one-sided in practice, and the name hides it.** The upper bound is
+> plate-relative and works. The lower bound is not plate-relative on any real run:
+> total reads are strongly right-skewed *within* a plate (typically Q1 ≈ 3.6M,
+> median ≈ 5.7M, Q3 ≈ 10.5M — a Q3/Q1 ratio near 2.9), so `median − 4 × IQR` is
+> negative and `pmax()` collapses it to the absolute floor every time.
+>
+> **This is not a scale bug that a transform repairs.** Rescaling was tested on
+> this run: a log2 fence leaves the lower bound below the floor in 49 of 50 bays
+> *and* guts the upper side (94 flags → 3); a lower semi-IQR fence
+> `median − k(median − Q1)` is negative in 48 of 50 bays at k = 4 and flags 93
+> wells at k = 2; a −40% multiplicative bound, like the one the IC gate uses,
+> flags 1031 wells (24.5%). The within-plate spread of total reads is simply too
+> wide to support *any* lower fence that is both plate-relative and selective.
+>
+> So the honest description is: **a plate-relative HIGH-read flag, plus an
+> absolute low-read floor.** The code below keeps `pmax()` — so behaviour is
+> unchanged, and the plate-relative bound will bind on a run where it can — but
+> reports the two mechanisms separately and states per plate-bay which one is
+> actually holding the line.
+>
+> The consequence to carry forward: **a chronically low-input plate position
+> cannot be caught here**, however far below its plate it sits, unless it drops
+> under `read_floor_abs`. That question has to be asked across plates at the
+> position level instead — which is what D.5.4 does.
 
 ```{r excessive_matching_reads, message=FALSE, warning=FALSE, echo=TRUE}
 # ---- Matching-Reads QC ----
@@ -971,9 +1395,9 @@ matching_df <- alamar_qc %>%
   )
 
 # ---- Outlier detection by Run × Bay ----
-#IQR MAY NOT CAPTURE LOWER READ OUTLIERS. USE ALAMAR LOWER BOUND OF 500,000 if the IQR bound is too low.
-#This changed from 11/06 version
-# Compute per-Run/Bay medians and flag outliers
+# The two bounds are NOT the same kind of test and are no longer computed as if
+# they were. Upper: plate-relative. Lower: pmax(absolute floor, plate-relative),
+# which in practice is the floor — see the note above and read_gate_geometry.csv.
 
 matching_outliers <- matching_df %>%
   group_by(Run, Bay) %>%
@@ -982,11 +1406,43 @@ matching_outliers <- matching_df %>%
     Q1     = quantile(Reads, 0.25, na.rm = TRUE),
     Q3     = quantile(Reads, 0.75, na.rm = TRUE),
     IQR    = Q3 - Q1,
-    Lower_Bound = pmax(500000, Median - read_out_thresh * IQR),
-    Upper_Bound = Median + read_out_thresh * IQR,
-    Matching_Outlier = Reads < Lower_Bound | Reads > Upper_Bound
+    Upper_Bound       = Median + read_out_thresh * IQR,
+    Lower_Bound_plate = Median - read_out_thresh * IQR,   # what the fence WOULD be
+    Lower_Bound       = pmax(read_floor_abs, Lower_Bound_plate),
+    # Which mechanism is actually holding the lower line on this plate?
+    lower_is_plate_relative = Lower_Bound_plate > read_floor_abs,
+    High_Read_Plate   = Reads > Upper_Bound,
+    Low_Read          = Reads < Lower_Bound,
+    Matching_Outlier  = High_Read_Plate | Low_Read
   ) %>%
   ungroup()
+
+# ---- Is the lower bound reachable at all? ----
+read_gate_geometry <- matching_outliers %>%
+  group_by(Run, Bay) %>%
+  summarise(
+    n_wells           = n(),
+    median_reads      = first(Median),
+    IQR_reads         = first(IQR),
+    lower_bound_plate = first(Lower_Bound_plate),
+    lower_bound_used  = first(Lower_Bound),
+    upper_bound       = first(Upper_Bound),
+    lower_is_plate_relative = first(lower_is_plate_relative),
+    min_reads_here    = min(Reads, na.rm = TRUE),
+    n_high            = sum(High_Read_Plate, na.rm = TRUE),
+    n_low             = sum(Low_Read, na.rm = TRUE),
+    .groups = "drop"
+  )
+write_csv(read_gate_geometry, "output_files/read_gate_geometry.csv")
+
+cat(sprintf("Lower read bound is plate-relative in %d of %d plate-bays (the %s floor binds in the rest).\n",
+            sum(read_gate_geometry$lower_is_plate_relative), nrow(read_gate_geometry),
+            format(read_floor_abs, big.mark = ",", scientific = FALSE)))
+cat(sprintf("Read flags: %d high (plate-relative) + %d low (%s) = %d of %d wells.\n",
+            sum(matching_outliers$High_Read_Plate, na.rm = TRUE),
+            sum(matching_outliers$Low_Read, na.rm = TRUE),
+            ifelse(any(read_gate_geometry$lower_is_plate_relative), "mixed bound", "absolute floor only"),
+            sum(matching_outliers$Matching_Outlier, na.rm = TRUE), nrow(matching_outliers)))
 
 # Convert factor levels (ensure ordered)
 matching_outliers$Run <- factor(matching_outliers$Run)
@@ -1016,7 +1472,11 @@ print(p)
 read_outliers <- matching_outliers %>%
     filter(Matching_Outlier == TRUE) %>%
     arrange(desc(Reads)) %>%
-    select(SampleID, Run, Bay, Lower_Bound, Upper_Bound, Reads)
+    mutate(Direction = dplyr::case_when(
+             High_Read_Plate          ~ "HIGH (plate-relative)",
+             lower_is_plate_relative  ~ "LOW (plate-relative)",
+             TRUE                     ~ "LOW (absolute floor)")) %>%
+    select(SampleID, Run, Bay, Direction, Lower_Bound, Upper_Bound, Reads)
 
 # Print table
 knitr::kable(
@@ -1064,7 +1524,49 @@ triage_df <- triage_df %>%
   group_by(SampleID) %>%
   summarize(Reason = paste(unique(Reason), collapse = "; "), .groups = "drop")
 
+# --- Per-axis membership, alongside the collapsed reason string ----------------
+# A well can exit on more than one axis. Any report that assigns ONE reason per
+# well — by precedence, or by reading the first entry of `Reason` — produces a
+# valid partition whose per-axis numbers are NOT axis totals. Downstream consumers
+# have made exactly that mistake, undercounting the PCA and burden axes badly.
+# These booleans are the axis totals; use them for "how many wells did this screen
+# catch", and use `Reason`/precedence only when the parts must sum to the whole.
+tri_ids  <- triage_df$SampleID
+axis_ids <- list(
+  tri_IC       = as.character(unlist(IC_outlier_samples)),
+  tri_PCA      = as.character(unlist(pca_outliers)),
+  tri_burden   = as.character(unlist(outlier_burden_samples)),
+  tri_bad_data = as.character(unlist(bad_samples))
+)
+for (a in names(axis_ids)) triage_df[[a]] <- tri_ids %in% axis_ids[[a]]
+triage_df$n_axes <- rowSums(as.matrix(triage_df[names(axis_ids)]))
+
 triage_df$AlamarWarning <- triage_df$SampleID  %in% warn_samps$`Sample Name`
+
+# Axis totals vs what a one-reason-per-well report would say, side by side.
+prec <- names(axis_ids)   # precedence order: IC > PCA > burden > bad data
+sole_reason <- apply(as.matrix(triage_df[prec]), 1, function(r) prec[which(r)[1]])
+triage_axis_overlap <- tibble(
+  axis            = prec,
+  on_axis_true    = vapply(prec, function(a) sum(triage_df[[a]]), integer(1)),
+  by_precedence   = vapply(prec, function(a) sum(sole_reason == a, na.rm = TRUE), integer(1)),
+  sole_axis_only  = vapply(prec, function(a)
+                      sum(triage_df[[a]] & triage_df$n_axes == 1), integer(1))
+) %>%
+  mutate(undercount_pct = ifelse(on_axis_true > 0,
+                                 round(100 * (on_axis_true - by_precedence) / on_axis_true, 1), 0))
+write_csv(triage_axis_overlap, "output_files/triage_axis_overlap.csv")
+
+triage_axis_combinations <- triage_df %>%
+  count(across(all_of(prec)), name = "n_wells") %>%
+  arrange(desc(n_wells))
+write_csv(triage_axis_combinations, "output_files/triage_axis_combinations.csv")
+
+knitr::kable(triage_axis_overlap,
+             caption = paste0("Per-axis triage totals. `on_axis_true` is how many wells each screen caught; ",
+                              "`by_precedence` is what a one-reason-per-well report shows. ",
+                              sum(triage_df$n_axes > 1), " of ", nrow(triage_df),
+                              " wells carry more than one axis."))
 # Print to RMarkdown
 knitr::kable(
   triage_df, 
@@ -1139,6 +1641,450 @@ knitr::kable(
                             bootstrap_options = c("striped", "hover", "condensed"))
 
 write_csv(plate_summary, "output_files/per_plate_QC_summary.csv")
+```
+
+## D.5 QC Screen Audit
+
+Everything above asks *what happened to the samples*. This section asks **whether
+the screens are any good**: does each gate fire at all, is it independent of the
+others, where does its cut sit on its own statistic, and is it keying on plate
+position rather than on the specimen.
+
+**Diagnostic only. Nothing here removes or flags a sample.**
+
+```{r audit-setup, message=FALSE, warning=FALSE, echo=TRUE}
+# The audit universe: every well that entered the screens.
+audit <- tibble(SampleID = rownames(combined_qc),
+                Run = combined_qc$Run, Bay = combined_qc$Bay) %>%
+  mutate(plate = paste(Run, Bay)) %>%
+  left_join(well_pos %>% select(SampleID, Well, wellRow, wellCol), by = "SampleID") %>%
+  left_join(intensity_df %>% select(SampleID, mean_INT, mean_INT_z, intensity_flag),
+            by = "SampleID") %>%
+  left_join(matching_outliers %>% select(SampleID, Reads, High_Read_Plate, Low_Read),
+            by = "SampleID") %>%
+  left_join(df_temp %>% select(SampleID, IC_Reads, Median_Value, IC_Outlier = Outlier_Flag),
+            by = "SampleID") %>%
+  left_join(alamar_qc %>% transmute(SampleID = `Sample Name`,
+                                    IC_Median = suppressWarnings(as.numeric(`IC Median`)) / .ic_scale,
+                                    Detectability = suppressWarnings(as.numeric(Detectability)),
+                                    QC_Status = `QC Status`),
+            by = "SampleID") %>%
+  left_join(triage_df %>% select(SampleID, Reason, tri_IC, tri_PCA, tri_burden,
+                                 tri_bad_data, n_axes), by = "SampleID") %>%
+  left_join(burden_stat %>% select(SampleID, fdr_min, n_out), by = "SampleID") %>%
+  left_join(pca_df %>% select(SampleID = Sample, PC_z_round1 = PC_z), by = "SampleID") %>%
+  mutate(across(c(tri_IC, tri_PCA, tri_burden, tri_bad_data, High_Read_Plate, Low_Read,
+                  IC_Outlier), ~ tidyr::replace_na(., FALSE)),
+         triaged      = SampleID %in% triage_df$SampleID,
+         read_flagged = SampleID %in% read_outliers$SampleID,
+         n_axes       = tidyr::replace_na(n_axes, 0L))
+
+# Detectability arrives as a 0-1 proportion or a 0-100 percent depending on the
+# export; put it on 0-1 so the vendor bar below means one thing.
+if (max(audit$Detectability, na.rm = TRUE) > 1.5) audit$Detectability <- audit$Detectability / 100
+
+cat(sprintf("Audit universe: %d wells, %d plate-bays, %d distinct well positions.\n",
+            nrow(audit), dplyr::n_distinct(audit$plate), dplyr::n_distinct(audit$Well)))
+```
+
+### D.5.1 Does each gate fire?
+
+A gate that fires on **zero** wells has not been shown to be safe — it has not
+been tested. It could be correctly finding nothing, or it could be unreachable by
+construction. Those are very different, and the count alone cannot tell them
+apart, so the headroom to each cut is reported next to it.
+
+```{r gate-inventory, message=FALSE, warning=FALSE, echo=TRUE}
+gate_row <- function(gate, action, fired, n, headroom = NA_character_, note = "") {
+  tibble(gate, action, n_fired = sum(fired, na.rm = TRUE), n_eval = n,
+         pct = round(100 * sum(fired, na.rm = TRUE) / n, 3),
+         headroom, status = ifelse(sum(fired, na.rm = TRUE) == 0,
+                                   "INERT - untested, not proven safe", "fires"),
+         note)
+}
+N <- nrow(audit)
+.hr <- function(x, cut) sprintf("max %.3f vs cut %.3f (%+.3f)", x, cut, x - cut)
+
+gate_inventory <- bind_rows(
+  gate_row("triage: IC outlier", "REMOVE", audit$tri_IC, N,
+           sprintf("%d of %d plate-bays have the 1000 floor binding",
+                   sum(ic_geom$floor_binds), nrow(ic_geom)),
+           "same quantity as the vendor IC Median metric - see D.2.3"),
+  gate_row("triage: PCA round 1", "REMOVE", audit$SampleID %in% extreme_samples_round1, N,
+           .hr(max(pca_df$PC_z, na.rm = TRUE), PCA_SD), ""),
+  gate_row("triage: PCA round 2", "REMOVE", audit$SampleID %in% extreme_samples_round2, N,
+           if (nrow(pca_df2)) .hr(max(pca_df2$PC_z, na.rm = TRUE), PCA_SD) else "not run",
+           "second pass, after round-1 outliers are removed"),
+  gate_row("triage: outlier burden", "REMOVE", audit$tri_burden, N,
+           local({
+             below <- op_points$fdr_min[op_points$fdr_min <  FDR_threshold]
+             above <- op_points$fdr_min[op_points$fdr_min >= FDR_threshold]
+             if (!length(below) || !length(above)) "cut is outside the observed FDR range"
+             else sprintf("cut sits between FDR %.4g and %.4g - nothing to tune between",
+                          max(below), min(above))
+           }),
+           "quantised: an integer anchor count, not a dial"),
+  gate_row("triage: bad data", "REMOVE", audit$tri_bad_data, N, NA_character_,
+           "non-numeric NPQ entries"),
+  gate_row("flag: high reads (plate-relative)", "FLAG", audit$High_Read_Plate, N,
+           NA_character_, ""),
+  gate_row("flag: low reads", "FLAG", audit$Low_Read, N,
+           sprintf("plate-relative lower bound reachable in %d of %d bays",
+                   sum(read_gate_geometry$lower_is_plate_relative), nrow(read_gate_geometry)),
+           "absolute floor in practice - see D.2.4"),
+  # Vendor bars come from the export's own preamble (section B), so this audit
+  # stays correct if Alamar changes one, and uses the right bar for the matrix.
+  gate_row(sprintf("vendor: Detectability < %.0f%%", 100 * vendor_thresholds$detectability_min),
+           "vendor warning", audit$Detectability < vendor_thresholds$detectability_min, N,
+           NA_character_,
+           sprintf("Alamar QC Status driver; bar is for %s", vendor_thresholds$sample_matrix)),
+  gate_row(sprintf("vendor: |IC Median| > %.2f", vendor_thresholds$ic_median),
+           "vendor warning", abs(audit$IC_Median) > vendor_thresholds$ic_median, N,
+           NA_character_, "Alamar QC Status driver"),
+  gate_row(sprintf("vendor: IC Reads < %s", format(vendor_thresholds$ic_reads_min, big.mark = ",")),
+           "vendor warning", audit$IC_Reads < vendor_thresholds$ic_reads_min, N,
+           sprintf("lowest IC Reads seen: %s",
+                   format(min(audit$IC_Reads, na.rm = TRUE), big.mark = ",")), ""),
+  gate_row(sprintf("vendor: Reads < %s",
+                   format(vendor_thresholds$reads_min, big.mark = ",", scientific = FALSE)),
+           "vendor warning", audit$Reads < vendor_thresholds$reads_min, N,
+           sprintf("lowest Reads seen: %s",
+                   format(min(audit$Reads, na.rm = TRUE), big.mark = ",")), ""),
+  gate_row("informational: whole-panel intensity", "NONE - reported only",
+           audit$intensity_flag %in% c("HIGH", "LOW"), N,
+           sprintf("range %.2f to %.2f SD", min(audit$mean_INT_z, na.rm = TRUE),
+                   max(audit$mean_INT_z, na.rm = TRUE)),
+           "D.0 - a covariate, never a gate")
+)
+write_csv(gate_inventory, "output_files/qc_gate_inventory.csv")
+
+knitr::kable(gate_inventory, caption = "QC gate inventory: what each screen actually did") %>%
+  kableExtra::kable_styling(full_width = TRUE,
+                            bootstrap_options = c("striped", "hover", "condensed"))
+
+.inert <- gate_inventory$gate[gate_inventory$n_fired == 0]
+if (length(.inert))
+  cat(sprintf("\nINERT on this run (%d): %s\n  These are UNTESTED. Check the headroom column before assuming they are simply finding nothing.\n",
+              length(.inert), paste(.inert, collapse = "; ")))
+```
+
+### D.5.2 Are the gates independent of each other?
+
+If two screens remove the same wells they are one screen reported twice, and the
+methods text should not present them as corroborating each other.
+
+```{r gate-overlap, message=FALSE, warning=FALSE, echo=TRUE}
+axes <- c(tri_IC = "IC", tri_PCA = "PCA", tri_burden = "burden")
+pairs <- utils::combn(names(axes), 2, simplify = FALSE)
+gate_overlap <- bind_rows(lapply(pairs, function(p) {
+  a <- audit[[p[1]]]; b <- audit[[p[2]]]
+  tibble(gate_a = axes[[p[1]]], gate_b = axes[[p[2]]],
+         n_a = sum(a), n_b = sum(b), n_both = sum(a & b),
+         jaccard = round(sum(a & b) / max(1, sum(a | b)), 3))
+}))
+# The read flag is a flag, not a triage axis, but "is it just triage again?" is
+# the same question.
+gate_overlap <- bind_rows(gate_overlap, tibble(
+  gate_a = "read flag", gate_b = "any triage",
+  n_a = sum(audit$read_flagged), n_b = sum(audit$triaged),
+  n_both = sum(audit$read_flagged & audit$triaged),
+  jaccard = round(sum(audit$read_flagged & audit$triaged) /
+                    max(1, sum(audit$read_flagged | audit$triaged)), 3)))
+write_csv(gate_overlap, "output_files/qc_gate_overlap.csv")
+knitr::kable(gate_overlap, caption = "Pairwise overlap between screens (Jaccard)")
+```
+
+### D.5.3 Where does each cut sit on its own statistic?
+
+The nearest retained well and the nearest removed well on each axis. If they are
+touching, the cut is splitting a continuum rather than separating two
+populations, and the exact threshold is doing more work than it looks.
+
+```{r cut-neighbourhood, message=FALSE, warning=FALSE, echo=TRUE}
+cut_nbhd <- function(stat, removed, gate, cut) {
+  ok <- !is.na(stat)
+  if (!any(ok & removed) || !any(ok & !removed)) return(NULL)
+  # Statistics here are all "larger = worse" except IC Median, handled by caller.
+  tibble(gate, cut,
+         nearest_removed = round(min(stat[ok & removed]), 4),
+         nearest_retained = round(max(stat[ok & !removed]), 4),
+         gap = round(min(stat[ok & removed]) - max(stat[ok & !removed]), 4))
+}
+# FDR can be exactly 0, so clamp before the log rather than carrying an Inf into
+# the min/max below.
+.nlp <- -log10(pmax(audit$fdr_min, .Machine$double.xmin))
+# Our IC gate fires on |IC Reads / plate median - 1| > 0.40, so that ratio — not
+# the vendor's IC Median — is the statistic its own cut sits on.
+.ic_stat <- abs(audit$IC_Reads / audit$Median_Value - 1)
+gate_cuts <- bind_rows(
+  cut_nbhd(.ic_stat, audit$tri_IC, "IC (|IC reads / plate median - 1|)", 0.40),
+  cut_nbhd(audit$PC_z_round1, audit$SampleID %in% extreme_samples_round1,
+           "PCA round 1 (PC_z)", PCA_SD),
+  cut_nbhd(.nlp, audit$tri_burden, "burden (-log10 FDR)", round(-log10(FDR_threshold), 4)),
+  # Cross-axis, and labelled as such: how far our call sits from the vendor bar.
+  # A negative gap here is disagreement between two gates, not a split population.
+  cut_nbhd(abs(audit$IC_Median), audit$tri_IC,
+           "our IC call read against the VENDOR statistic", ic_median_thresh)
+)
+write_csv(gate_cuts, "output_files/gate_cut_neighbourhood.csv")
+knitr::kable(gate_cuts, caption = "Nearest removed vs nearest retained well on each axis. A gap at or below 0 means the cut lands inside a continuous population.")
+```
+
+### D.5.4 Is a screen keying on plate position rather than on the specimen?
+
+A well position that is triaged far more often than the others across many plates
+is a **layout or hardware** problem, not a specimen problem — and it is invisible
+to every within-plate screen above, because each of those only ever compares a
+well to its own plate.
+
+The test is a permutation, not a chi-square: triage counts spread over ~96
+positions leave most cells at 0 or 1, where an asymptotic test is not conservative
+but wrong. Labels are shuffled **within each plate-bay**, holding each plate's
+triage count fixed, so plate-level effects cannot manufacture a position signal.
+The statistic is the **maximum** per-position count, which needs no further
+multiple-testing correction.
+
+> **On the word "site".** This asks about the *physical site on the plate*.
+> Clustering by **clinical collection site** is a different and equally important
+> question, and it cannot be asked here: Primary QC is deliberately agnostic to
+> phenotype and covariates, and the site label only exists after the metadata
+> merge. The well-level table in D.5.6 carries every gate flag keyed by
+> `SampleID` precisely so that question can be answered downstream with a single
+> join — see `Secondary_QC/Triage_Review/`.
+
+```{r position-effects, message=FALSE, warning=FALSE, echo=TRUE}
+set.seed(123)
+
+perm_max_position <- function(flag, pos, plate, n_perm) {
+  keep <- !is.na(pos) & !is.na(flag)
+  flag <- flag[keep]; pos <- pos[keep]; plate <- plate[keep]
+  lev  <- sort(unique(pos))
+  obs_counts <- tabulate(match(pos[flag], lev), nbins = length(lev))
+  obs <- max(obs_counts)
+  # Under the null, each plate's k flagged wells are a uniform random subset of
+  # that plate's wells. Draw per plate, so plate composition is held fixed.
+  pos_by_plate <- split(pos, plate)
+  k_by_plate   <- vapply(split(flag, plate), sum, integer(1))
+  null <- replicate(n_perm, {
+    drawn <- unlist(Map(function(pp, k) if (k > 0) sample(pp, k) else pp[0],
+                        pos_by_plate, k_by_plate), use.names = FALSE)
+    max(tabulate(match(drawn, lev), nbins = length(lev)))
+  })
+  list(obs = obs, p = (1 + sum(null >= obs)) / (n_perm + 1),
+       null_mean = mean(null),
+       tab = tibble(Well = lev, n_flagged = obs_counts,
+                    n_wells = as.integer(table(factor(pos, levels = lev)))) %>%
+             mutate(pct = round(100 * n_flagged / n_wells, 2)) %>%
+             arrange(desc(n_flagged)))
+}
+
+if (all(is.na(audit$Well))) {
+  cat("No well positions available — plate-position diagnostics skipped.\n")
+} else {
+  pe_tri  <- perm_max_position(audit$triaged,      audit$Well, audit$plate, n_perm)
+  pe_read <- perm_max_position(audit$read_flagged, audit$Well, audit$plate, n_perm)
+
+  write_csv(pe_tri$tab,  "output_files/well_position_effects.csv")
+  write_csv(pe_read$tab, "output_files/well_position_effects_readflag.csv")
+
+  cat(sprintf("Triage by position: worst well is %s at %d of %d (%.1f%%), against %.1f%% elsewhere.\n",
+              pe_tri$tab$Well[1], pe_tri$tab$n_flagged[1], pe_tri$tab$n_wells[1],
+              pe_tri$tab$pct[1],
+              100 * sum(pe_tri$tab$n_flagged[-1]) / sum(pe_tri$tab$n_wells[-1])))
+  cat(sprintf("  permutation on the maximum: observed %d, null mean %.2f, p = %.4f\n",
+              pe_tri$obs, pe_tri$null_mean, pe_tri$p))
+  cat(sprintf("Read flags by position: max %d, null mean %.2f, p = %.4f\n",
+              pe_read$obs, pe_read$null_mean, pe_read$p))
+
+  knitr::kable(head(pe_tri$tab, 10),
+               caption = "Most-triaged well positions across all plate-bays")
+
+  # Which axis does the worst position exit on? A single axis points at one
+  # mechanism; a spread points at a generally bad well.
+  .w <- pe_tri$tab$Well[1]
+  .wa <- audit %>% filter(Well == .w, triaged) %>%
+    summarise(IC = sum(tri_IC), PCA = sum(tri_PCA), burden = sum(tri_burden),
+              bad_data = sum(tri_bad_data))
+  cat(sprintf("Position %s exits via: IC %d, PCA %d, burden %d, bad data %d\n",
+              .w, .wa$IC, .wa$PCA, .wa$burden, .wa$bad_data))
+}
+```
+
+#### Is there a standing spatial gradient underneath it?
+
+A single bad position is usually the extreme of a smooth trend across the plate
+rather than an isolated defect. The IC is the right quantity to look at: NPQ is
+normalised to it, so a position that recovers less IC shifts every reported value
+for the specimen that lands there.
+
+```{r position-gradient, message=FALSE, warning=FALSE, echo=TRUE}
+if (!all(is.na(audit$Well))) {
+  pos_map <- audit %>%
+    filter(!is.na(Well), !is.na(IC_Median)) %>%
+    group_by(Well, wellRow, wellCol) %>%
+    summarise(n = n(), median_IC_Median = round(median(IC_Median, na.rm = TRUE), 4),
+              median_mean_INT = round(median(mean_INT, na.rm = TRUE), 4), .groups = "drop") %>%
+    arrange(median_IC_Median)
+  write_csv(pos_map, "output_files/position_map_IC.csv")
+
+  print(
+    ggplot(pos_map, aes(x = factor(wellCol), y = factor(wellRow, levels = rev(sort(unique(wellRow)))),
+                        fill = median_IC_Median)) +
+      geom_tile(colour = "white") +
+      scale_fill_gradient2(low = "#B2182B", mid = "#F7F7F7", high = "#2166AC", midpoint = 0) +
+      theme_minimal() +
+      labs(title = "Median IC recovery by plate position, pooled over all plate-bays",
+           subtitle = "Red = this position systematically recovers less IC than its plate",
+           x = "Column", y = "Row", fill = "median\nIC Median")
+  )
+
+  # Pre-specified direction: does IC recovery fall from row A to row H? Reported
+  # per plate-bay, so a single odd plate cannot carry it.
+  row_grad <- audit %>%
+    filter(!is.na(wellRow), !is.na(IC_Median)) %>%
+    mutate(row_i = match(wellRow, LETTERS)) %>%
+    group_by(Run, Bay) %>%
+    filter(dplyr::n_distinct(row_i) > 2) %>%
+    summarise(spearman = suppressWarnings(cor(row_i, IC_Median, method = "spearman",
+                                              use = "complete.obs")),
+              .groups = "drop")
+  write_csv(row_grad, "output_files/ic_row_gradient.csv")
+  cat(sprintf("IC recovery falls from row A to row H in %d of %d plate-bays (median rho %.2f).\n",
+              sum(row_grad$spearman < 0, na.rm = TRUE), nrow(row_grad),
+              median(row_grad$spearman, na.rm = TRUE)))
+
+  # Confirmatory check of the low corner reported by the 2026-07-27 Triage_Review
+  # audit (rows F-H x columns 9-12). Stated in advance, so on a NEW run this is a
+  # genuine test; on the run it was found in, treat it as descriptive.
+  corner_rows <- c("F", "G", "H"); corner_cols <- 9:12
+  cor_df <- audit %>%
+    filter(!is.na(Well), !is.na(IC_Median)) %>%
+    mutate(in_corner = wellRow %in% corner_rows & wellCol %in% corner_cols)
+  if (any(cor_df$in_corner) && any(!cor_df$in_corner)) {
+    .c <- median(cor_df$IC_Median[cor_df$in_corner], na.rm = TRUE)
+    .r <- median(cor_df$IC_Median[!cor_df$in_corner], na.rm = TRUE)
+    obs_d <- .c - .r
+
+    # Shuffle the corner/not label WITHIN each plate-bay, so a plate that simply
+    # ran low overall cannot manufacture the contrast. Sort once, outside the loop.
+    ord   <- order(paste(cor_df$Run, cor_df$Bay))
+    v     <- cor_df$IC_Median[ord]
+    grp   <- split(seq_along(ord), paste(cor_df$Run, cor_df$Bay)[ord])
+    lab   <- cor_df$in_corner[ord]
+    null_d <- replicate(n_perm, {
+      s <- logical(length(lab))
+      for (g in grp) s[g] <- sample(lab[g])
+      median(v[s], na.rm = TRUE) - median(v[!s], na.rm = TRUE)
+    })
+    cat(sprintf("Prior-specified corner (rows %s x cols %d-%d): %+.4f vs %+.4f elsewhere, difference %+.4f, permutation p = %.4f\n",
+                paste(corner_rows, collapse = ""), min(corner_cols), max(corner_cols),
+                .c, .r, obs_d, (1 + sum(abs(null_d) >= abs(obs_d))) / (n_perm + 1)))
+    cat("  Stated in advance from the 2026-07-27 audit: confirmatory on a new run, descriptive on the run it was found in.\n")
+  }
+}
+```
+
+### D.5.5 The intensity axis against the gates
+
+`mean_INT` (D.0) is the level statistic none of the gates compute. Reading each
+triage class against it shows what each screen is actually selecting — and
+whether the pipeline is quietly reshaping the intensity distribution.
+
+**Report per class, never pooled.** The classes point in opposite directions on
+this axis, so a pooled mean describes none of them.
+
+```{r intensity-vs-gates, message=FALSE, warning=FALSE, echo=TRUE}
+cohens_d <- function(x, y) {
+  x <- x[!is.na(x)]; y <- y[!is.na(y)]
+  if (length(x) < 2 || length(y) < 2) return(NA_real_)
+  s <- sqrt(((length(x)-1)*var(x) + (length(y)-1)*var(y)) / (length(x)+length(y)-2))
+  if (!is.finite(s) || s == 0) return(NA_real_)
+  (mean(x) - mean(y)) / s
+}
+auc <- function(x, y) {   # P(random x > random y), ties at 0.5
+  x <- x[!is.na(x)]; y <- y[!is.na(y)]
+  if (!length(x) || !length(y)) return(NA_real_)
+  r <- rank(c(x, y))
+  (sum(r[seq_along(x)]) - length(x) * (length(x) + 1) / 2) / (length(x) * length(y))
+}
+
+ref <- audit$mean_INT_z[!audit$triaged & !audit$read_flagged]
+classes <- list(
+  "triaged (ALL - do not read this row)" = audit$triaged,
+  "  IC only"        = audit$tri_IC & audit$n_axes == 1,
+  "  PCA (any axis)" = audit$tri_PCA,
+  "  burden (any axis)" = audit$tri_burden,
+  "read-flagged HIGH" = audit$read_flagged & audit$High_Read_Plate
+)
+axis_attr <- bind_rows(lapply(names(classes), function(nm) {
+  v <- audit$mean_INT_z[classes[[nm]]]
+  tibble(class = nm, n = sum(classes[[nm]], na.rm = TRUE),
+         mean_INT_z = round(mean(v, na.rm = TRUE), 3),
+         cohens_d = round(cohens_d(v, ref), 3),
+         AUC = round(auc(v, ref), 3))
+}))
+write_csv(axis_attr, "output_files/qc_axis_attribution.csv")
+knitr::kable(axis_attr,
+             caption = "Each triage class on the whole-panel intensity axis, against retained wells")
+
+# Does QC reshape the intensity distribution, or only clip its tail? The moment
+# skewness will move simply from deleting extreme points; a robust measure will
+# not, unless the body of the distribution really changed.
+bowley <- function(v) { q <- stats::quantile(v, c(.25,.5,.75), na.rm = TRUE)
+  unname((q[3] + q[1] - 2*q[2]) / (q[3] - q[1])) }
+m3 <- function(v) { v <- v[!is.na(v)]; mean((v - mean(v))^3) / stats::sd(v)^3 }
+pre  <- audit$mean_INT_z
+post <- audit$mean_INT_z[!audit$triaged]
+cat(sprintf("Intensity distribution, pre-triage -> post-triage:\n  moment skew %+.3f -> %+.3f    Bowley skew %+.3f -> %+.3f    range [%.2f, %.2f] -> [%.2f, %.2f]\n",
+            m3(pre), m3(post), bowley(pre), bowley(post),
+            min(pre, na.rm = TRUE), max(pre, na.rm = TRUE),
+            min(post, na.rm = TRUE), max(post, na.rm = TRUE)))
+cat("  If Bowley barely moves while the moment skew does, QC clipped a tail and did not reshape the body.\n")
+cat("  Either way the intensity axis survives QC and still belongs in the analysis model.\n")
+```
+
+#### What to do with the read-flagged wells
+
+They are **kept**, and that is the right call — but "the flag is redundant once
+you model depth" is a stronger claim than this pipeline can support, and it
+should not be written into methods text as though it had been established.
+
+Two things to carry downstream:
+
+* **Model `log2(Reads)`, per marker.** NPQ is IC-normalised and total reads are
+  close to independent of IC reads, so a pure sequencing-depth effect ought to
+  divide out and leave slope 0. It does not — the depth slopes are strongly
+  marker-specific, so one shared depth covariate will not absorb it identically
+  across the panel.
+* **"High-read" is a property of the well's neighbours.** The bound is
+  plate-relative, so the same specimen run on a different plate need not be
+  flagged. Treat the flag as a statement about a well, not about a subject.
+
+### D.5.6 Well-level QC table
+
+One row per well, carrying every gate flag, the intensity axis, plate position
+and read/IC statistics. This is the join key for anything downstream that needs
+to ask a question Primary QC cannot — above all **clustering by clinical
+collection site**, which needs the metadata merge.
+
+```{r well-level-table, message=FALSE, warning=FALSE, echo=TRUE}
+well_qc <- audit %>%
+  transmute(SampleID, Run, Bay, Well, wellRow, wellCol,
+            triaged, Reason, n_axes, tri_IC, tri_PCA, tri_burden, tri_bad_data,
+            read_flagged, High_Read_Plate, Low_Read,
+            mean_INT, mean_INT_z, intensity_flag,
+            Reads, IC_Reads, IC_ratio_to_plate_median = round(IC_Reads / Median_Value, 4),
+            IC_Median, Detectability, QC_Status,
+            PC_z_round1 = round(PC_z_round1, 3), burden_fdr_min = fdr_min,
+            burden_n_out = n_out) %>%
+  arrange(Run, Bay, Well)
+
+write_csv(well_qc, "output_files/well_level_QC.csv")
+cat(sprintf("Wrote output_files/well_level_QC.csv: %d wells x %d columns\n",
+            nrow(well_qc), ncol(well_qc)))
+knitr::kable(head(well_qc %>% select(SampleID, Run, Bay, Well, triaged, n_axes,
+                                     read_flagged, mean_INT_z, Reads), 10),
+             caption = "well_level_QC.csv (first 10 rows, subset of columns)")
 ```
 
 # E. Biomarker QC
@@ -1490,5 +2436,68 @@ cat("Saved TRIAGE low-QC biomarker file:", triage_low_file, "\n")
 ```
 
 # G.  Notes
+
+## G.1 What the 2026-07-30 audit revision changed, and what it deliberately did not
+
+Implements `Secondary_QC/Triage_Review/README.md`. **No sample's fate changed.**
+Triage and flag membership are identical to the previous version; what changed is
+what the pipeline measures and says about itself.
+
+**Added**
+
+* **D.0 `mean_INT`** — whole-panel intensity, computed pre-triage over all wells
+  so removed wells are on the same scale as retained ones. Reported, never gated.
+* **D.5** — the screen audit: gate inventory with INERT detection and headroom,
+  gate overlap, cut neighbourhoods, plate-position permutation tests, the
+  intensity axis read against each triage class, and `well_level_QC.csv`.
+* **Per-axis triage booleans** (`tri_IC`, `tri_PCA`, `tri_burden`,
+  `tri_bad_data`, `n_axes`) on `samples_to_triage.csv`.
+* **`PC_z`** on both PCA coordinate files, so the operating point is auditable.
+
+**Corrected in the reporting, not in the arithmetic**
+
+* The **read gate is one-sided in practice.** Its lower bound is not
+  plate-relative on any real run and cannot be made so — see D.2.4, where four
+  alternative fences are shown to fail. The gate is now described and reported as
+  a plate-relative *high* flag plus an absolute floor. The `pmax()` is retained,
+  so behaviour is unchanged and the plate-relative bound will bind if a run ever
+  supports it.
+* **Our IC gate is Alamar's `IC Median` recomputed**, not an independent
+  in-house check (Jaccard 0.966 on the 50-plate run). Methods text should not
+  present it as a second opinion. It supplies roughly three quarters of triage.
+* **`FDR_threshold` is not a dial.** It is an integer count of anchors wearing a
+  p-value. D.2.2 prints the complete list of settings that exist.
+* **`exit_reason`-style one-reason-per-well reports are not axis totals.**
+  Precedence gives a valid partition, but it undercut the PCA axis by 37.5% and
+  the burden axis by 64% on this run. Use the per-axis booleans for "how many
+  wells did this screen catch".
+
+**Deliberately not done**
+
+* **`mean_INT` was not made a gate.** It is the statistic that would catch the
+  uniformly-bright samples the burden test structurally cannot — which is exactly
+  why it is tempting. But background intensity is a continuous nuisance covariate
+  affecting every sample, not a population of bad wells. Gating on it would
+  delete real variation. Model it instead.
+* **The PCA cut was not loosened** to reach bright wells. On this run the
+  brightest wells sit *below* the PCA cut on `PC_z`, so lowering it admits dim
+  wells before it admits a single bright one. The instrument is not turned down;
+  it is pointed elsewhere.
+* **PCA round 2 was not deleted** although it fired on nothing here. It is now
+  reported as INERT with its headroom, which is a statement about this run, not
+  about the screen.
+
+## G.2 Questions this pipeline cannot answer
+
+**Clustering by clinical collection site.** Primary QC is agnostic to phenotype
+and covariates by design, and the site label only exists after the metadata
+merge. D.5.4 tests the *physical position on the plate*, which is a different
+question that happens to share the word "site" — and which is what surfaced the
+worst-position and corner-gradient findings. For collection site, join
+`well_level_QC.csv` to the merged metadata; `Secondary_QC/Triage_Review/` already
+does this.
+
+**Whether the read flag is redundant given depth.** See D.5.5 — it has been shown
+to be *small*, which is not the same as shown to be *nothing*.
 
 Combined Data:

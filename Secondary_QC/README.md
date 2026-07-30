@@ -73,6 +73,32 @@ install.packages(c("lme4", "irr", "patchwork", "car"))
 > (2025 vs 2026) clustering section + adjust-for recommendation were added. On this dataset the dominant
 > batch axis is the **submission year**, confounded with **Site** (Cramér's V 0.55).
 
+### Triage_Metadata/ — do the QC decisions know who the specimen came from?
+Primary QC triages and flags on assay statistics only, and is agnostic to phenotype
+by design. This module asks whether those decisions land evenly across **clinical
+collection site**, diagnosis, ancestry, sex and age. Base R only; **diagnostic only**.
+
+Requires `Metadata_Merge` output plus `Primary_QC/output_files/well_level_QC.csv`
+(older runs are reconstructed automatically).
+
+**Scripts:** `run_triage_metadata.R`, `test_triage_metadata.R`
+
+**Key outputs:**
+- `mutual_adjustment.csv` — each label given the others **and read depth**: which one is actually carrying an association, and which was a proxy
+- `metadata_association_tests.csv` — per axis × variable: two permutation statistics, within-plate versions, conditioned deviances, and a **minimum detectable effect on every null**
+- `triage_rates_by_metadata.csv` — per-group rates with Wilson CIs, groups below the size floor kept and marked
+- `site_detail.csv`, `design_confounding.csv`, `balance_*.csv`, `unlabelled_wells.csv`
+
+> **Status (2026-07-30):** on the 50-plate run the read flag's apparent site and
+> diagnosis associations are **entirely read depth** (site keeps 13% of its
+> deviance after adjustment), while the **IC axis** carries mutually independent
+> associations with site (p = 0.046), ancestry (p = 0.016) and age (p = 0.030).
+> It also **corrects** `Triage_Review` §5: the 40%-triage site is 2 wells of 5.
+
+> ⚠️ **The other modules below are documented; `Extremes/`, `Specimen_Quality/`,
+> `Detectability_LOD/` and `Triage_Review/` are not yet listed here.** See each
+> module's own README.
+
 ---
 
 ## Workflow
@@ -80,10 +106,12 @@ install.packages(c("lme4", "irr", "patchwork", "car"))
 ```
 Primary_QC
 ├── Replicate_Analysis      (raw NPQ; run directly after Primary_QC)
+├── Triage_Review           (audits the Primary QC screens themselves)
 └── Metadata_Merge
     ├── Hemolysis_Check     (requires merged data)
     ├── APOE                (requires merged data with genotype info)
-    └── Batch_Effects       (requires merged_combined_post_QC.csv)  ← NEW
+    ├── Batch_Effects       (requires merged_combined_post_QC.csv)
+    └── Triage_Metadata     (QC decisions vs specimen metadata)  ← NEW
 ```
 
 ## Getting Started
