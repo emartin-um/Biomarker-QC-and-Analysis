@@ -416,16 +416,23 @@ if (!is.null(at) && "mean_INT_z" %in% at$axis) {
   cat("     'triaged wells are dim' story that need not describe most of them.\n")
 }
 
-if (!is.null(rsp)) {
-  cat(sprintf("\n  triage by site: highest rate %.1f%%, permutation p = %.4f\n",
-              100 * rsp$observed_max_rate, rsp$p))
-  if (!is.null(rsc))
-    cat(sprintf("  site deviance explained: %.1f alone -> %.1f after read depth\n",
-                rsc$dev_group_only, rsc$dev_group_given_depth))
+report_group <- function(lbl, pp, cond) {
+  if (is.null(pp)) return(invisible(NULL))
+  cat(sprintf("\n  %s (%d groups with n >= %d; %d smaller groups excluded)\n",
+              lbl, pp$n_groups, pp$min_n, pp$n_groups_dropped))
+  cat(sprintf("    omnibus     deviance %6.1f            p = %.4f   <- read this one\n",
+              pp$omnibus_deviance, pp$omnibus_p))
+  cat(sprintf("    max rate    %5.1f%% (null %.1f%%)        p = %.4f\n",
+              100 * pp$observed_max_rate, 100 * pp$null_mean_max_rate, pp$max_rate_p))
+  if (pp$smallest_group_n < 20)
+    cat(sprintf("    NOTE smallest retained group is n = %d; a maximum-rate statistic is\n         unreliable there, which is why the omnibus is reported beside it.\n",
+                pp$smallest_group_n))
+  if (!is.null(cond))
+    cat(sprintf("    deviance explained: %.1f alone -> %.1f after read depth\n",
+                cond$dev_group_only, cond$dev_group_given_depth))
 }
-if (!is.null(rfp))
-  cat(sprintf("  read flags by site: highest rate %.1f%%, permutation p = %.4f\n",
-              100 * rfp$observed_max_rate, rfp$p))
+report_group("triage by site", rsp, rsc)
+report_group("read flags by site", rfp, NULL)
 
 cat("\n🚫 DIAGNOSTIC ONLY. Nothing here is a drop rule, and nothing here proposes\n")
 cat("   one. A gate that fires on nobody has not been shown to be safe — only\n")

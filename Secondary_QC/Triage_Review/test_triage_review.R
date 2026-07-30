@@ -140,6 +140,38 @@ ok("a flat flag gives no significant position effect",
    { set.seed(9); f2 <- sample(c(TRUE, FALSE), nrow(big), TRUE, c(.02, .98))
      attr(position_effects(f2, big$r, big$c, n_perm = 2000L), "perm")$p > 0.05 })
 
+cat("\n-- rate_by_group: a tiny group must not drive the answer --\n")
+# The regression this guards. A 5-well group with 2 events gives a 40% rate; a
+# maximum-rate statistic calls that significant, and it is noise. Default floor
+# is n >= 20 and an omnibus statistic is reported beside the maximum.
+set.seed(21)
+big <- data.frame(g = rep(paste0("S", 1:6), each = 60),
+                  f = as.logical(rbinom(360, 1, 0.02)), stringsAsFactors = FALSE)
+tiny <- data.frame(g = rep("TINY", 5), f = c(TRUE, TRUE, FALSE, FALSE, FALSE),
+                   stringsAsFactors = FALSE)
+dd <- rbind(big, tiny)
+rg <- rate_by_group(dd$f, dd$g, n_perm = 2000L)
+pp <- attr(rg, "perm")
+ok("the default size floor is 20", formals(rate_by_group)$min_n == 20)
+ok("a 5-well group is excluded by default and counted, not dropped silently",
+   !("TINY" %in% rg$group) && pp$n_groups_dropped == 1,
+   sprintf("%d groups kept, %d dropped", pp$n_groups, pp$n_groups_dropped))
+ok("both an omnibus and a maximum-rate p are reported",
+   all(c("omnibus_p", "max_rate_p") %in% names(pp)))
+ok("the excluded group's name is recoverable", identical(pp$dropped, "TINY"))
+# and with the floor lowered, the tiny group DOES dominate the maximum - which is
+# exactly why the floor exists
+rg2 <- rate_by_group(dd$f, dd$g, min_n = 5L, n_perm = 2000L)
+pp2 <- attr(rg2, "perm")
+ok("lowering the floor lets the 5-well group take over the maximum",
+   pp2$observed_max_rate == 0.4 && pp2$max_rate_p < pp$max_rate_p,
+   sprintf("max rate %.2f, p %.4f (floor 20 gave p %.4f)",
+           pp2$observed_max_rate, pp2$max_rate_p, pp$max_rate_p))
+ok("the omnibus is far less disturbed by it than the maximum",
+   abs(pp2$omnibus_p - pp$omnibus_p) < abs(pp2$max_rate_p - pp$max_rate_p),
+   sprintf("omnibus %.3f -> %.3f vs max %.3f -> %.3f",
+           pp$omnibus_p, pp2$omnibus_p, pp$max_rate_p, pp2$max_rate_p))
+
 cat("\n-- row_gradient --\n")
 rr2 <- rep(LETTERS[1:8], each = 10)
 val <- rep(8:1, each = 10) + rnorm(80, 0, 0.01)

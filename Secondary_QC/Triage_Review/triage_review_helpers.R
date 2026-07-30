@@ -380,38 +380,74 @@ axis_attribution <- function(d, classes, axes) {
   }))
 }
 
-#' Rate of a flag by group, with a permutation p and a depth-conditioned check.
+#' Rate of a flag by group, with BOTH an omnibus and a maximum-rate test.
 #'
-#' Site and depth are confounded (depth is ~37% a site property), so a raw
-#' site-rate difference is not evidence of a site QC problem. The conditioned
-#' column refits the rate against the group after regressing out depth; if the
+#' ⚠ The maximum-rate statistic on its own is not safe at small group sizes, and
+#' this function used to default to `min_n = 5` and report only that. On the
+#' 50-plate run it produced "triage by site reaches 40.0%, p = 0.0040" — which
+#' was **2 wells out of 5** at one site (Wilson 95% CI 11.8%–76.9%). Raise the
+#' floor to n >= 20 and the same test gives **p = 0.40**. A maximum keys on the
+#' extreme, and a group of five supplies extremes out of nothing.
+#'
+#' What actually survives on that run is a diffuse association across the 19
+#' sites with n >= 20: omnibus deviance 30.6 on 18 df, p = 0.032. So the fix is
+#' both a size floor and an omnibus statistic reported alongside the maximum, so
+#' the maximum can never be read on its own again.
+#'
+#' Site and depth are also confounded (depth is ~37% a site property), so the
+#' conditioned columns refit against the group with depth partialled out; if the
 #' association is composition it collapses.
-rate_by_group <- function(flag, group, depth = NULL, min_n = 5, n_perm = 10000L, seed = 1L) {
+#'
+#' @param min_n minimum group size. Groups below it are dropped from BOTH tests
+#'   and counted in the `n_groups_dropped` attribute — never silently.
+rate_by_group <- function(flag, group, depth = NULL, min_n = 20L, n_perm = 10000L, seed = 1L) {
   ok <- !is.na(group)
   g <- as.character(group)[ok]; f <- flag[ok]
-  lv <- names(which(table(g) >= min_n))
+  tab <- table(g)
+  lv  <- names(which(tab >= min_n))
+  dropped <- setdiff(names(tab), lv)
   if (!length(lv)) return(NULL)
-  set.seed(seed)
-  k <- sum(f)
+  keep <- g %in% lv; g <- g[keep]; f <- f[keep]
+
   out <- do.call(rbind, lapply(lv, function(v) {
     i <- g == v
     data.frame(group = v, n = sum(i), n_flagged = sum(f & i),
                pct = round(100 * sum(f & i) / sum(i), 2),
                stringsAsFactors = FALSE, row.names = NULL)
   }))
-  # chi-square-like dispersion across groups, permuted (valid at tiny cell counts)
-  stat <- function(lab) {
-    e <- vapply(lv, function(v) sum(lab[g == v]), numeric(1))
+
+  # --- two statistics, permuted the same way -------------------------------
+  # Grouped-binomial deviance, computed directly so the permutation stays cheap.
+  dev_stat <- function(lab) {
+    p <- mean(lab)
+    if (p <= 0 || p >= 1) return(0)
+    k <- vapply(lv, function(v) sum(lab[g == v]), numeric(1))
     n <- vapply(lv, function(v) sum(g == v), numeric(1))
-    max(e / n)
+    pg <- k / n
+    t1 <- ifelse(k > 0, k * log(pg / p), 0)
+    t2 <- ifelse(n - k > 0, (n - k) * log((1 - pg) / (1 - p)), 0)
+    2 * sum(t1 + t2)
   }
-  null <- replicate(n_perm, {
-    l <- logical(length(f)); l[sample.int(length(f), k)] <- TRUE; stat(l) })
-  attr(out, "perm") <- list(observed_max_rate = stat(f),
-                            null_mean_max_rate = mean(null),
-                            p = (1 + sum(null >= stat(f))) / (n_perm + 1))
+  max_stat <- function(lab) max(vapply(lv, function(v) mean(lab[g == v]), numeric(1)))
+
+  set.seed(seed); k <- sum(f); n_tot <- length(f)
+  nul <- replicate(n_perm, {
+    l <- logical(n_tot); l[sample.int(n_tot, k)] <- TRUE
+    c(dev_stat(l), max_stat(l))
+  })
+  obs <- c(dev_stat(f), max_stat(f))
+  attr(out, "perm") <- list(
+    n_groups = length(lv), n_groups_dropped = length(dropped), min_n = min_n,
+    dropped = dropped,
+    omnibus_deviance = round(obs[1], 2),
+    omnibus_p = (1 + sum(nul[1, ] >= obs[1])) / (n_perm + 1),
+    observed_max_rate = obs[2],
+    null_mean_max_rate = mean(nul[2, ]),
+    max_rate_p = (1 + sum(nul[2, ] >= obs[2])) / (n_perm + 1),
+    smallest_group_n = min(vapply(lv, function(v) sum(g == v), numeric(1))))
+
   if (!is.null(depth)) {
-    dd <- .num(depth)[ok]
+    dd <- .num(depth)[ok][keep]
     m0 <- stats::glm(f ~ 1, family = stats::binomial())
     m1 <- suppressWarnings(stats::glm(f ~ factor(g), family = stats::binomial()))
     m2 <- suppressWarnings(stats::glm(f ~ factor(g) + dd, family = stats::binomial()))

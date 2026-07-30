@@ -137,23 +137,34 @@ leave-one-site-out, leave-one-run-out, within-plate-bay and cohort-only). So
 `log2(reads)` is a real and marker-specific term, not a formality — and one
 common covariate will not absorb it identically across the panel.
 
-### 5. Do they cluster by site? Yes for triage — but the real cluster is a *well*.
+### 5. Do they cluster by site? Weakly, and not where the first pass said.
 
-Triage rate by site reaches 40.0% (permutation p = 0.0040 on the maximum rate),
-and it is **not** depth composition — conditioning on read depth *increases* the
-site deviance explained (41.4 → 46.1). Read flags by site are not significant
-(p = 0.165). But the site signal rests on small sites, and the much sharper
-result is positional:
+> ⚠️ **Corrected 2026-07-30.** An earlier version of this section reported
+> "triage by site reaches 40.0%, permutation p = 0.0040". That was **2 wells out
+> of 5** at one site (Wilson 95% CI 11.8%–76.9%), found by a maximum-rate
+> statistic with a size floor of n ≥ 5 — and a maximum keys on exactly that kind
+> of extreme. `rate_by_group()` now defaults to **n ≥ 20** and reports an
+> **omnibus** statistic beside the maximum, so the maximum can no longer be read
+> on its own. See also `Secondary_QC/Triage_Metadata/`, which separates site from
+> depth, ancestry and age.
 
-> ⚠️ **Superseded on the site question — see `Secondary_QC/Triage_Metadata/`
-> (2026-07-30).** That 40.0% rests on a handful of wells at one small site, and a
-> maximum-rate statistic keys on exactly that kind of extreme. With a size floor
-> and an omnibus statistic alongside the maximum, the site picture changes; that
-> module also separates site from read depth, ancestry and age, which this one
-> did not attempt. **Read its per-run report for the current numbers.**
->
-> The positional finding below is unaffected — it rests on 50 observations of one
-> position, not on a small site.
+Over the 19 sites with n ≥ 20 (4 smaller sites excluded, and named in the output):
+
+| | omnibus deviance | omnibus p | max rate | max-rate p |
+|---|---:|---:|---:|---:|
+| triage | 30.6 | **0.039** | 5.3% | 0.40 |
+| read flags | 78.1 | **0.0001** | 15.0% | 0.003 |
+
+- **Triage** is a weak, diffuse association across sites rather than one bad site,
+  and it is **not** depth composition — conditioning on read depth leaves it
+  slightly larger (deviance 30.6 → 34.5).
+- **Read flags** are strongly site-structured, which the old maximum-rate test
+  missed entirely (it reported p = 0.165). Since the flag is essentially a depth
+  threshold and depth is ~37% a site property, that is the expected direction.
+
+The statistic mattered in both directions: it manufactured a triage signal that
+is not there and hid a read-flag signal that is. The positional finding below is
+unaffected — it rests on 50 observations of one well position, not on a small site.
 
 > **Well F7 is triaged in 9 of its 50 plate-bays — 18.0%, against 1.64% at every
 > other position.** Permutation on the maximum per-position count: observed 9,
