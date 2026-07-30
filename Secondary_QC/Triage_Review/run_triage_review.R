@@ -227,6 +227,43 @@ ppf <- attr(pf, "perm")
 wr(pf, "well_position_effects_readflag.csv")
 grad <- row_gradient(d$IC_Median, d$wellRow, d$run_bay)
 wr(grad, "ic_row_gradient.csv")
+# The decisive position statistic: within-plate rank, which survives plate-level
+# shifts and is comparable across assay periods. Emitted overall and per period,
+# because "the pattern is the same but the magnitude moved" is the finding.
+prm <- position_rank_map(d$IC_Median, paste0(d$wellRow, d$wellCol), d$run_bay)
+prm_perm <- attr(prm, "perm")
+wr(prm, "position_rank_map_IC.csv")
+prm_yr <- do.call(rbind, lapply(sort(unique(d$year)), function(y) {
+  i <- d$year == y
+  if (length(unique(d$run_bay[i])) < 3) return(NULL)
+  z <- position_rank_map(d$IC_Median[i], paste0(d$wellRow, d$wellCol)[i], d$run_bay[i], n_perm = 1000L)
+  cbind(year = y, z)
+}))
+wr(prm_yr, "position_rank_map_IC_by_year.csv")
+
+# The spatial pattern as a single contrast: the far corner of the plate (high
+# rows x high columns) against the rest, permuted WITHIN plate so plate-level
+# shifts cannot produce it. This is the number to quote — it is stable across
+# assay periods, whereas any individual well's change is not.
+d$plate_region <- ifelse(match(d$wellRow, LETTERS) >= 6 & d$wellCol >= 9,
+                         "far corner (F-H x 9-12)", "rest of plate")
+reg <- do.call(rbind, lapply(c("all", sort(unique(d$year))), function(y) {
+  i <- if (y == "all") rep(TRUE, nrow(d)) else d$year == y
+  lr <- d$plate_region[i] == "far corner (F-H x 9-12)"
+  x <- d$IC_Median[i]; pbi <- d$run_bay[i]
+  obs <- mean(x[lr], na.rm = TRUE) - mean(x[!lr], na.rm = TRUE)
+  set.seed(5)
+  null <- replicate(2000L, { pp <- lr
+    for (b in unique(pbi)) { j <- which(pbi == b); pp[j] <- sample(lr[j]) }
+    mean(x[pp], na.rm = TRUE) - mean(x[!pp], na.rm = TRUE) })
+  data.frame(period = y, n_corner = sum(lr), n_rest = sum(!lr),
+             mean_corner = round(mean(x[lr], na.rm = TRUE), 4),
+             mean_rest = round(mean(x[!lr], na.rm = TRUE), 4),
+             difference = round(obs, 4),
+             perm_p = round((1 + sum(null <= obs)) / (length(null) + 1), 5),
+             stringsAsFactors = FALSE, row.names = NULL)
+}))
+wr(reg, "plate_region_contrast_IC.csv")
 
 ## 5g. site clustering, permuted and depth-conditioned
 rs <- rate_by_group(d$triaged, d$Site, d$l2reads)
@@ -324,9 +361,44 @@ if (pp$p < 0.05) {
               if (length(unique(d$Run[isw & d$triaged])) > 2)
                 "not one plate, so not a one-off handling error"
               else "few enough plates that a one-off is possible"))
-  cat("  -> if the rate is confined to one period, this is DRIFT at one physical\n")
-  cat("     coordinate, not a layout flaw. That is a question for the lab.\n")
+  # Whether THIS position changed more than positions change in general is a
+  # separate question from whether it is bad, and it is easy to overclaim: with
+  # 84 positions, a couple will always move. Report the change against the spread
+  # of changes across all positions rather than asserting drift.
+  if (length(unique(d$year)) == 2 && !is.null(prm_yr)) {
+    ys <- sort(unique(d$year))
+    a <- tapply(d$IC_Median[d$year == ys[1]], paste0(d$wellRow, d$wellCol)[d$year == ys[1]], mean)
+    b <- tapply(d$IC_Median[d$year == ys[2]], paste0(d$wellRow, d$wellCol)[d$year == ys[2]], mean)
+    kk <- intersect(names(a), names(b)); ch <- b[kk] - a[kk]
+    cat(sprintf("  change %s->%s at %s: %+.3f, against SD %.3f across all %d positions (%.1f SD)\n",
+                ys[1], ys[2], wp, ch[wp], stats::sd(ch), length(kk),
+                (ch[wp] - mean(ch)) / stats::sd(ch)))
+    cat(sprintf("  other positions moving similarly: %s\n",
+                paste(names(sort(ch)[1:4]), collapse = ", ")))
+    cat("  -> treat 'this well degraded' as suggestive unless it stands well clear\n")
+    cat("     of that spread. The reproducible map above is the stronger claim.\n")
+  }
 }
+cat(sprintf("\n  within-plate rank map of IC_Median (the statistic that survives plate shifts):\n"))
+cat(sprintf("    worst positions: %s\n", paste(head(prm$position, 6), collapse = ", ")))
+cat(sprintf("    %s sits in the bottom decile of its own plate on %d of %d plate-bays\n",
+            prm$position[1], prm$n_plates_in_bottom_decile[1], prm$n_plates[1]))
+cat(sprintf("    within-plate permutation: observed %.4f, null %.4f, p = %.4f\n",
+            prm_perm$observed, prm_perm$null_mean, prm_perm$p))
+if (!is.null(prm_yr) && length(unique(prm_yr$year)) == 2) {
+  ys <- unique(prm_yr$year)
+  a <- prm_yr[prm_yr$year == ys[1], ]; b <- prm_yr[prm_yr$year == ys[2], ]
+  k <- intersect(a$position, b$position)
+  r <- stats::cor(a$median_pct_rank[match(k, a$position)], b$median_pct_rank[match(k, b$position)])
+  cat(sprintf("    the SAME map in both periods: r = %.3f over %d positions\n", r, length(k)))
+  cat("    -> a standing spatial pattern, not a one-period failure. What moved\n")
+  cat("       between periods is the magnitude, not which wells are affected.\n")
+}
+cat("\n  far corner of the plate vs the rest (permuted within plate):\n")
+for (i in seq_len(nrow(reg)))
+  cat(sprintf("    %-6s corner %+.3f vs rest %+.3f   difference %+.3f   p = %.4f\n",
+              reg$period[i], reg$mean_corner[i], reg$mean_rest[i],
+              reg$difference[i], reg$perm_p[i]))
 neg <- sum(grad$rho_row_vs_value < 0, na.rm = TRUE)
 cat(sprintf("\n  IC recovery down the plate: Spearman(row, IC_Median) is negative in %d of %d\n  plate-bays (median %.3f). Strictly monotone in %d.\n",
             neg, sum(!is.na(grad$rho_row_vs_value)), stats::median(grad$rho_row_vs_value, na.rm = TRUE),

@@ -149,31 +149,44 @@ result is positional:
 > other position.** Permutation on the maximum per-position count: observed 9,
 > null mean 3.87, **p = 0.0001**. All 9 exit through the IC axis.
 
-**And it is drift, not a layout flaw** — which is the part that makes it
-actionable:
+**The robust finding is a standing spatial gradient, not one broken well.** Median
+`IC_Median` by well position shows a low corner — rows F–H × columns 9–12 — that
+is present *identically in both reagent lots*:
 
-| F7 | plate-bays | triaged | mean IC_Median |
-|---|---:|---:|---:|
-| 2025 | 35 | 2 (5.7%) | −0.020 |
-| **2026** | 15 | **7 (46.7%)** | **−0.400** |
-| same column, other rows | 350 | 6 (1.7%) | +0.019 |
-| everywhere else | 3800 | 62 (1.6%) | +0.028 |
+| | corner (F–H × 9–12) | rest of plate | difference | perm p |
+|---|---:|---:|---:|---:|
+| 2025 | −0.124 | +0.021 | **−0.145** | 0.0002 |
+| 2026 | −0.130 | +0.030 | **−0.161** | 0.0002 |
 
-F7 behaved normally in 2025 and its internal-control recovery collapsed in 2026
-to sit right on the ±0.40 gate. It spans **7 distinct runs and 3 bays**, so it is
-not one plate and not a one-off handling error. It is also **not control
-adjacency**: the control block occupies columns 6 and 8 in rows D–H, so D7, E7,
-G7 and H7 are flanked identically and sit at +0.019 with 6 triaged in 200 wells.
+The whole position map correlates **r = 0.932** between the two lots, and the
+permutation shuffles positions *within each plate*, so plate-level effects cannot
+produce it. Raw IC reads also fall from row A to row H on **50 of 50** plate-bays
+(median Spearman −0.75) — a consistent tendency, though **0 of 50** bays are
+strictly monotone.
 
-The underlying gradient is real too: **IC recovery declines from plate row A to
-row H on 50 of 50 plate-bays** (median Spearman −0.738). Note it is a consistent
-*tendency*, not monotone — **0 of 50** bays are strictly monotone and the pooled
-row means break at row G — so the module reports the distribution of ρ rather
-than claiming a monotone decline. Because the IC gate keys on exactly this
-quantity, **well position partly decides who gets triaged.**
+**F7 is the extreme of that gradient**, in the bottom decile of its own plate on
+**15 of 15** 2026 plate-bays (16 of 35 in 2025), across 7 runs and 3 bays. In 2026
+its whole population lands on the ±0.40 line: all 15 wells span −0.34 to −0.47, so
+6 cross the flag and the other 9 sit within 0.06 of it. The gate splits one
+uniformly shifted population near-arbitrarily.
 
-This is a wet-lab question, not an analysis one, and it is the single most
-actionable thing here: one physical coordinate degraded between assay periods.
+> **What this module does *not* claim.** An earlier draft called F7 "2026 drift at
+> one coordinate". That does not survive: across 84 positions the 2025→2026 change
+> has SD 0.20 and F7's −0.38 is 1.8 SD of it, with two other positions (A8 −0.31,
+> A1 −0.30) moving comparably. With 84 positions, a couple always will. The runner
+> now prints the change against that spread instead of asserting drift.
+
+It is also **not** control adjacency — the control block is columns 6 and 8 in rows
+D–H, so D7/E7/G7/H7 are flanked identically and sit at +0.019 — and **not** sample
+composition: F7 draws from 12 of 23 sites, and the corner shows no significant
+association with site, diagnosis or ancestry (p = 0.078 / 0.94 / 0.44).
+
+**It reaches the reported values, not just the flag.** Because NPQ is normalised to
+the IC, corner wells read **+0.116 vs −0.019** on whole-panel level (p = 0.002).
+Small — 0.13 SD — but systematic, and keyed to position rather than specimen.
+
+This is a wet-lab and vendor question rather than an analysis one, and it is the
+single most actionable thing here.
 
 ### 6. And one that changes how another module should be read
 
