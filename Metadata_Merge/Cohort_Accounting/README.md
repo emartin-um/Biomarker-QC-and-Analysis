@@ -133,6 +133,26 @@ is worth knowing precisely because it cannot be assumed. The four
 of the 77 triaged wells trip more than one** — so the single reason genuinely is
 a choice, and the full set is still on the row.
 
+> ### ⚠️ `exit_reason` is a partition, NOT an axis tabulation
+>
+> Because the QC reasons resolve by the precedence above (IC > PCA > burden), the
+> per-reason counts here are **not** per-axis totals. On the 50-plate run:
+>
+> | axis | wells on the axis | `exit_reason` says | sole reason |
+> |---|---:|---:|---:|
+> | IC | 58 | 58 | 50 |
+> | PCA | **16** | 10 | 2 |
+> | burden | **25** | 9 | 9 |
+>
+> So `exit_reason` undercounts the PCA axis by 37.5% and the burden axis by
+> 64.0%. Both are right answers to different questions — "how much loss does this
+> stage own" (partition, what this module is for) versus "how many wells did this
+> screen catch" (axis total). Reading one as the other is the failure mode.
+>
+> For axis totals use `Secondary_QC/Triage_Review/triage_axis_overlap.csv`, which
+> reports both side by side. The total of 77 and the 77/648 = 11.9% headline are
+> unaffected.
+
 ---
 
 ## Outputs
