@@ -149,16 +149,31 @@ result is positional:
 > other position.** Permutation on the maximum per-position count: observed 9,
 > null mean 3.87, **p = 0.0001**. All 9 exit through the IC axis.
 
-A specimen-quality screen should be flat across the plate. This one is not, and
-the mechanism is visible: **IC recovery declines from plate row A to row H on
-50 of 50 plate-bays** (median Spearman −0.738). Note the gradient is a consistent
+**And it is drift, not a layout flaw** — which is the part that makes it
+actionable:
+
+| F7 | plate-bays | triaged | mean IC_Median |
+|---|---:|---:|---:|
+| 2025 | 35 | 2 (5.7%) | −0.020 |
+| **2026** | 15 | **7 (46.7%)** | **−0.400** |
+| same column, other rows | 350 | 6 (1.7%) | +0.019 |
+| everywhere else | 3800 | 62 (1.6%) | +0.028 |
+
+F7 behaved normally in 2025 and its internal-control recovery collapsed in 2026
+to sit right on the ±0.40 gate. It spans **7 distinct runs and 3 bays**, so it is
+not one plate and not a one-off handling error. It is also **not control
+adjacency**: the control block occupies columns 6 and 8 in rows D–H, so D7, E7,
+G7 and H7 are flanked identically and sit at +0.019 with 6 triaged in 200 wells.
+
+The underlying gradient is real too: **IC recovery declines from plate row A to
+row H on 50 of 50 plate-bays** (median Spearman −0.738). Note it is a consistent
 *tendency*, not monotone — **0 of 50** bays are strictly monotone and the pooled
 row means break at row G — so the module reports the distribution of ρ rather
 than claiming a monotone decline. Because the IC gate keys on exactly this
 quantity, **well position partly decides who gets triaged.**
 
-This is a wet-lab / layout question, not an analysis one, and it is the single
-most actionable thing here.
+This is a wet-lab question, not an analysis one, and it is the single most
+actionable thing here: one physical coordinate degraded between assay periods.
 
 ### 6. And one that changes how another module should be read
 

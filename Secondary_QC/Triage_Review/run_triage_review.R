@@ -296,8 +296,37 @@ cat(sprintf("  worst position for triage: %s at %d of %d wells (%.1f%%) vs %.2f%
             100 * (sum(d$triaged) - pe$n_flagged[1]) / (N - pe$n_wells[1])))
 cat(sprintf("  permutation on the max per position: observed %d, null mean %.2f, p = %.4f\n",
             pp$observed_max, pp$null_mean_max, pp$p))
-if (pp$p < 0.05)
+if (pp$p < 0.05) {
   cat("  ⚠ a position effect this size is not sampling noise. A specimen-quality screen\n    should be flat across the plate; check the layout for that well.\n")
+  # Is it a standing design property, or did it START? A position that was fine and
+  # went bad is drift in one physical location — a different (and more tractable)
+  # problem from a layout flaw that was always there. Split the worst position by
+  # assay period and by its immediate neighbours.
+  wp <- pe$position[1]
+  w <- d$wellRow[match(wp, paste0(d$wellRow, d$wellCol))]
+  cn <- as.integer(sub("^[A-Z]", "", wp))
+  nb_pos <- paste0(setdiff(LETTERS[1:8], w), cn)          # same column, other rows
+  isw <- paste0(d$wellRow, d$wellCol) == wp
+  isn <- paste0(d$wellRow, d$wellCol) %in% nb_pos
+  cat(sprintf("\n  %s by assay period:\n", wp))
+  for (y in sort(unique(d$year))) {
+    i <- isw & d$year == y
+    cat(sprintf("    %s  triaged %d of %2d   mean IC_Median %+.3f\n",
+                y, sum(d$triaged[i]), sum(i), mean(d$IC_Median[i], na.rm = TRUE)))
+  }
+  cat(sprintf("  same column, other rows (n=%d): triaged %d, mean IC_Median %+.3f\n",
+              sum(isn), sum(d$triaged & isn), mean(d$IC_Median[isn], na.rm = TRUE)))
+  cat(sprintf("  everywhere else       (n=%d): triaged %d, mean IC_Median %+.3f\n",
+              sum(!isw & !isn), sum(d$triaged & !isw & !isn),
+              mean(d$IC_Median[!isw & !isn], na.rm = TRUE)))
+  cat(sprintf("  spans %d runs and %d bays -- %s\n",
+              length(unique(d$Run[isw & d$triaged])), length(unique(d$Bay[isw & d$triaged])),
+              if (length(unique(d$Run[isw & d$triaged])) > 2)
+                "not one plate, so not a one-off handling error"
+              else "few enough plates that a one-off is possible"))
+  cat("  -> if the rate is confined to one period, this is DRIFT at one physical\n")
+  cat("     coordinate, not a layout flaw. That is a question for the lab.\n")
+}
 neg <- sum(grad$rho_row_vs_value < 0, na.rm = TRUE)
 cat(sprintf("\n  IC recovery down the plate: Spearman(row, IC_Median) is negative in %d of %d\n  plate-bays (median %.3f). Strictly monotone in %d.\n",
             neg, sum(!is.na(grad$rho_row_vs_value)), stats::median(grad$rho_row_vs_value, na.rm = TRUE),
