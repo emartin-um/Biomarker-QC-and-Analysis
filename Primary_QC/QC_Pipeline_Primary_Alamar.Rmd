@@ -116,8 +116,15 @@ Adjustable QC parameters include:
 | `FDR_threshold` | 0.01 | Significance threshold for outlier burden |
 | `scaffold_mode` | `"frozen"` | QC Biomarker Set selection: `"frozen"` (fixed 21-anchor scaffold + per-plate tripwire) or `"rederive"` (per-run derive + de-correlate). Changes only the sample-triage anchors, not output biomarker content. |
 | `intensity_sd_flag` | 2.5 | SDs of `mean_INT_z` for the whole-panel intensity flag. **Informational only — never triages** (D.0) |
-| `ic_median_thresh` | 0.40 | Alamar's own `IC Median` bar, used in D.2.3 to test whether our IC gate is a re-derivation of it |
+| `ic_median_thresh` | 0.40 | Alamar's own `IC Median` bar, used in D.2.3 to test whether our IC gate is a re-derivation of it. **Overridden by the value in the export's preamble when present** |
 | `n_perm` | 10000 | Permutation replicates for the plate-position tests in D.5.4 |
+| `prior_region` | `NULL` | Optional plate region named *in advance* for a confirmatory contrast in D.5.4. Leave `NULL`; the layout-agnostic spatial tests always run |
+
+**Vendor thresholds are not parameters.** `Detectability`, `IC Reads`, `Reads` and
+`IC Median` bars are read from the `Sample_QC.csv` preamble at load time, and the
+detectability bar is resolved against the run's own `SAMPLE_MATRIX` — so a CSF
+run gets the vendor's 70% bar rather than plasma's 90%. Defaults are used only if
+the preamble cannot be parsed.
 
 
 ## A.3 Initial Setup 
@@ -160,6 +167,18 @@ ic_median_thresh <- 0.40
 # 84-96 positions leave most cells at 0 or 1, where a chi-square is not
 # conservative but wrong.
 n_perm <- 10000
+
+# OPTIONAL confirmatory check of a plate region named IN ADVANCE (D.5.4).
+#
+# Leave NULL for a normal run. D.5.4 always runs layout-agnostic spatial tests
+# (row gradient, column gradient, edge vs interior) and always reports the
+# empirically worst region descriptively — none of which needs this.
+#
+# Set it only to re-test a region a PREVIOUS run flagged, which makes the p-value
+# confirmatory rather than a search. Hardcoding a region found in this same data
+# would be circular, which is why there is no default:
+#   prior_region <- list(rows = c("F","G","H"), cols = 9:12)   # 50-plate frozen, 2026-07-27
+prior_region <- NULL
 
 # QC Biomarker Set (scaffold) selection — how the markers used for SAMPLE triage are chosen.
 #   "frozen"   : (default) a fixed, pre-vetted, de-correlated anchor set (stable across batches) + a
@@ -1953,33 +1972,73 @@ if (!all(is.na(audit$Well))) {
               sum(row_grad$spearman < 0, na.rm = TRUE), nrow(row_grad),
               median(row_grad$spearman, na.rm = TRUE)))
 
-  # Confirmatory check of the low corner reported by the 2026-07-27 Triage_Review
-  # audit (rows F-H x columns 9-12). Stated in advance, so on a NEW run this is a
-  # genuine test; on the run it was found in, treat it as descriptive.
-  corner_rows <- c("F", "G", "H"); corner_cols <- 9:12
-  cor_df <- audit %>%
-    filter(!is.na(Well), !is.na(IC_Median)) %>%
-    mutate(in_corner = wellRow %in% corner_rows & wellCol %in% corner_cols)
-  if (any(cor_df$in_corner) && any(!cor_df$in_corner)) {
-    .c <- median(cor_df$IC_Median[cor_df$in_corner], na.rm = TRUE)
-    .r <- median(cor_df$IC_Median[!cor_df$in_corner], na.rm = TRUE)
-    obs_d <- .c - .r
-
-    # Shuffle the corner/not label WITHIN each plate-bay, so a plate that simply
-    # ran low overall cannot manufacture the contrast. Sort once, outside the loop.
-    ord   <- order(paste(cor_df$Run, cor_df$Bay))
-    v     <- cor_df$IC_Median[ord]
-    grp   <- split(seq_along(ord), paste(cor_df$Run, cor_df$Bay)[ord])
-    lab   <- cor_df$in_corner[ord]
-    null_d <- replicate(n_perm, {
-      s <- logical(length(lab))
-      for (g in grp) s[g] <- sample(lab[g])
+  # --- region contrasts, permuted within plate ------------------------------
+  # One helper, used for every region test below. Shuffling the region label
+  # WITHIN each plate-bay means a plate that simply ran low overall cannot
+  # manufacture a contrast.
+  cor_df <- audit %>% filter(!is.na(Well), !is.na(IC_Median))
+  region_test <- function(inreg, label) {
+    inreg <- !is.na(inreg) & inreg
+    if (!any(inreg) || !any(!inreg)) return(invisible(NULL))
+    obs <- median(cor_df$IC_Median[inreg], na.rm = TRUE) -
+           median(cor_df$IC_Median[!inreg], na.rm = TRUE)
+    ord <- order(paste(cor_df$Run, cor_df$Bay))
+    v   <- cor_df$IC_Median[ord]
+    grp <- split(seq_along(ord), paste(cor_df$Run, cor_df$Bay)[ord])
+    lab <- inreg[ord]
+    nul <- replicate(n_perm, {
+      s <- logical(length(lab)); for (g in grp) s[g] <- sample(lab[g])
       median(v[s], na.rm = TRUE) - median(v[!s], na.rm = TRUE)
     })
-    cat(sprintf("Prior-specified corner (rows %s x cols %d-%d): %+.4f vs %+.4f elsewhere, difference %+.4f, permutation p = %.4f\n",
-                paste(corner_rows, collapse = ""), min(corner_cols), max(corner_cols),
-                .c, .r, obs_d, (1 + sum(abs(null_d) >= abs(obs_d))) / (n_perm + 1)))
-    cat("  Stated in advance from the 2026-07-27 audit: confirmatory on a new run, descriptive on the run it was found in.\n")
+    cat(sprintf("  %-34s %+.4f vs %+.4f elsewhere  diff %+.4f  perm p = %.4f\n",
+                label, median(cor_df$IC_Median[inreg], na.rm = TRUE),
+                median(cor_df$IC_Median[!inreg], na.rm = TRUE), obs,
+                (1 + sum(abs(nul) >= abs(obs))) / (n_perm + 1)))
+    invisible(obs)
+  }
+
+  # Layout-agnostic and always run: no region is named in advance, so these are
+  # valid on any plate geometry and cannot be accused of picking their target.
+  cat("Spatial structure (permuted within plate-bay):\n")
+  .rl <- sort(unique(cor_df$wellRow)); .cl <- sort(unique(cor_df$wellCol))
+  if (length(.rl) > 2 && length(.cl) > 2)
+    region_test(cor_df$wellRow %in% .rl[c(1, length(.rl))] |
+                cor_df$wellCol %in% .cl[c(1, length(.cl))], "edge vs interior")
+
+  # Column gradient, the companion to the row gradient above.
+  col_grad <- audit %>%
+    filter(!is.na(wellCol), !is.na(IC_Median)) %>%
+    group_by(Run, Bay) %>%
+    filter(dplyr::n_distinct(wellCol) > 2) %>%
+    summarise(spearman = suppressWarnings(cor(wellCol, IC_Median, method = "spearman",
+                                              use = "complete.obs")), .groups = "drop")
+  cat(sprintf("  IC recovery falls left-to-right in %d of %d plate-bays (median rho %.2f)\n",
+              sum(col_grad$spearman < 0, na.rm = TRUE), nrow(col_grad),
+              median(col_grad$spearman, na.rm = TRUE)))
+
+  # The empirically worst quadrant, reported DESCRIPTIVELY. No p-value: the
+  # region was chosen by looking, so any p-value here would be a search result
+  # dressed as a test. It is a lead for the next run's `prior_region`.
+  .rq <- .rl[seq_len(ceiling(length(.rl) / 2))]; .cq <- .cl[seq_len(ceiling(length(.cl) / 2))]
+  quads <- list("top-left" = list(.rq, .cq),
+                "top-right" = list(.rq, setdiff(.cl, .cq)),
+                "bottom-left" = list(setdiff(.rl, .rq), .cq),
+                "bottom-right" = list(setdiff(.rl, .rq), setdiff(.cl, .cq)))
+  qd <- vapply(quads, function(q) {
+    i <- cor_df$wellRow %in% q[[1]] & cor_df$wellCol %in% q[[2]]
+    if (!any(i)) NA_real_ else median(cor_df$IC_Median[i], na.rm = TRUE) -
+      median(cor_df$IC_Median[!i], na.rm = TRUE) }, numeric(1))
+  cat(sprintf("  lowest-IC quadrant (descriptive, chosen by looking): %s at %+.4f vs rest\n",
+              names(qd)[which.min(qd)], min(qd, na.rm = TRUE)))
+  cat("    -> to TEST it, set prior_region in A.3 and re-run on the NEXT dataset.\n")
+
+  # Confirmatory only if a region was named in advance (A.3 `prior_region`).
+  if (!is.null(prior_region)) {
+    pr <- cor_df$wellRow %in% prior_region$rows & cor_df$wellCol %in% prior_region$cols
+    cat("Prior-specified region (named before this run, so this p-value is confirmatory):\n")
+    region_test(pr, sprintf("rows %s x cols %s",
+                            paste(prior_region$rows, collapse = ""),
+                            paste(range(prior_region$cols), collapse = "-")))
   }
 }
 ```

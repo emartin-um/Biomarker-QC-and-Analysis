@@ -217,10 +217,20 @@ mutual_adjustment <- function(flag, labels, min_n = 20L, depth = NULL) {
     stats::as.formula(paste("f ~", if (length(terms)) paste(terms, collapse = " + ") else "1")),
     data = d, family = stats::binomial())))
   full <- dv(used)
+  # Adding a term cannot mathematically increase deviance, but glm's IRLS stops
+  # at a tolerance, so a term explaining essentially nothing can come back a hair
+  # negative (-0.03 on a 0.51 deviance was seen in practice). Clamp that to 0 —
+  # a negative deviance and a negative "retained share" are nonsense to a reader.
+  # Anything beyond rounding is a real problem, so it warns rather than hides.
+  .clamp <- function(x) {
+    if (is.finite(x) && x < -0.5)
+      warning(sprintf("mutual_adjustment(): deviance reduction %.3f is negative beyond tolerance", x))
+    max(0, x)
+  }
   do.call(rbind, lapply(used, function(v) {
     df_v <- if (v == ".depth") 1L else nlevels(d[[v]]) - 1L
-    dev_alone <- dv(character(0)) - dv(v)
-    dev_adj   <- dv(setdiff(used, v)) - full
+    dev_alone <- .clamp(dv(character(0)) - dv(v))
+    dev_adj   <- .clamp(dv(setdiff(used, v)) - full)
     data.frame(variable = ifelse(v == ".depth", "log2(reads)", v),
                df = df_v, n_wells = nrow(d), n_flagged = sum(d$f),
                dev_alone = round(dev_alone, 2),
@@ -235,34 +245,58 @@ mutual_adjustment <- function(flag, labels, min_n = 20L, depth = NULL) {
 # 3. Metadata tidying — explicit, and written out
 # -----------------------------------------------------------------------------
 
-#' Collapse the free-text diagnosis columns to analysis levels.
+#' Collapse the free-text diagnosis column to analysis levels, using the
+#' pipeline's OWN curated table when it is available.
 #'
-#' `Case_Control` arrives with 15 distinct values on the 50-plate run, several of
-#' which are administrative rather than clinical ("Missing", "Insufficient
-#' Data"). Collapsing is unavoidable; doing it silently is not. The mapping is
-#' returned so it can be written to disk and argued with.
-collapse_diagnosis <- function(x) {
-  v <- .blank_to_na(x); lo <- tolower(trimws(v))
+#' `Metadata_Merge/review/CDX_review.csv` maps every observed `CDX` string to a
+#' `FINAL_CDX_collapsed` level, and is the mapping the rest of the pipeline uses.
+#' Re-deriving it from string matching here would put a second, drifting
+#' definition of diagnosis in the same repo — and a hand-written matcher is
+#' cohort-specific by construction: it only knows the vocabulary of the cohort it
+#' was written against.
+#'
+#' ONE DIFFERENCE FROM THE MERGE, ON PURPOSE. The review table marks several
+#' levels `NA`, meaning "exclude from the analysis cohort". This module must NOT
+#' drop them: a well excluded from the cohort was still either triaged or not,
+#' and on the 50-plate run those wells carried the highest triage rate of any
+#' group. They become an explicit `not_codeable_label` level instead.
+#'
+#' @param cdx_review the review data frame, or NULL to fall back to the
+#'   vocabulary matcher below (which is a fallback, not the intended path).
+collapse_diagnosis <- function(x, cdx_review = NULL,
+                               not_codeable_label = "Not codeable") {
+  v <- .blank_to_na(x)
+  if (!is.null(cdx_review) &&
+      all(c("CDX", "FINAL_CDX_collapsed") %in% names(cdx_review))) {
+    key <- trimws(as.character(cdx_review$CDX))
+    val <- trimws(as.character(cdx_review$FINAL_CDX_collapsed))
+    val[val == "" | toupper(val) == "NA"] <- NA_character_
+    m <- match(trimws(v), key)
+    out <- val[m]
+    # unmatched, blank, or cohort-excluded all land in the explicit level
+    out[is.na(out)] <- not_codeable_label
+    return(out)
+  }
+  # Fallback: no review table. Keeps the module usable, but the mapping is a
+  # guess at the cohort's vocabulary and is reported as such by collapse_map().
+  lo <- tolower(trimws(v))
   out <- rep(NA_character_, length(v))
-  out[lo %in% c("control", "nci", "0")]                        <- "Control"
-  out[lo %in% c("case", "ad")]                                 <- "Case (AD)"
-  out[lo %in% c("mci", "cind", "cognitively impaired")]        <- "MCI/CIND"
-  out[grepl("dementia|lewy|vascular", lo)]                     <- "Other dementia"
-  out[lo %in% c("other", "other medical diagnosis")]           <- "Other"
-  # Administrative non-answers are their OWN level, never folded into a clinical
-  # one and never dropped: on this run they carry the highest triage rate seen,
-  # which is a finding about data capture, not about dementia.
-  out[lo %in% c("missing", "insufficient data")]               <- "Not codeable"
-  out[is.na(v)]                                                <- "Not codeable"
-  out[is.na(out)]                                              <- "Other"
+  out[lo %in% c("control", "nci", "0")]                 <- "Control"
+  out[lo %in% c("case", "ad")]                          <- "Case (AD)"
+  out[lo %in% c("mci", "cind", "cognitively impaired")] <- "MCI/CIND"
+  out[grepl("dementia|lewy|vascular", lo)]              <- "Dementia_Other"
+  out[is.na(out)]                                       <- not_codeable_label
   out
 }
 
-collapse_map <- function(x) {
+collapse_map <- function(x, cdx_review = NULL, not_codeable_label = "Not codeable") {
   v <- .blank_to_na(x)
-  m <- data.frame(raw = ifelse(is.na(v), "<NA>", v), collapsed = collapse_diagnosis(v),
+  m <- data.frame(raw = ifelse(is.na(v), "<NA>", v),
+                  collapsed = collapse_diagnosis(v, cdx_review, not_codeable_label),
+                  source = if (is.null(cdx_review)) "fallback matcher" else "CDX_review.csv",
                   stringsAsFactors = FALSE)
-  a <- aggregate(list(n_wells = rep(1L, nrow(m))), by = list(raw = m$raw, collapsed = m$collapsed), FUN = sum)
+  a <- aggregate(list(n_wells = rep(1L, nrow(m))),
+                 by = list(raw = m$raw, collapsed = m$collapsed, source = m$source), FUN = sum)
   a[order(a$collapsed, -a$n_wells), ]
 }
 
@@ -305,10 +339,19 @@ assign_ancestry_from_review <- function(d, anc_review, other_label = "Other") {
   out
 }
 
-age_band <- function(a) {
-  x <- .num(a)
-  ifelse(is.na(x), NA_character_,
-  ifelse(x < 60, "<60", ifelse(x < 70, "60-69", ifelse(x < 80, "70-79", "80+"))))
+#' Age bands. Cutpoints are a parameter, not a constant: a cohort with a
+#' different age range needs different bands, and bands that leave one level
+#' holding 90% of the wells test nothing.
+age_band <- function(a, breaks = c(60, 70, 80)) {
+  x <- .num(a); breaks <- sort(unique(breaks))
+  if (!length(breaks)) return(ifelse(is.na(x), NA_character_, "all"))
+  lab <- c(paste0("<", breaks[1]),
+           if (length(breaks) > 1) paste0(breaks[-length(breaks)], "-", breaks[-1] - 1),
+           paste0(breaks[length(breaks)], "+"))
+  out <- rep(NA_character_, length(x))
+  ok <- !is.na(x)
+  out[ok] <- lab[findInterval(x[ok], breaks) + 1L]
+  out
 }
 
 # -----------------------------------------------------------------------------

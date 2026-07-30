@@ -89,11 +89,8 @@ Requires `Metadata_Merge` output plus `Primary_QC/output_files/well_level_QC.csv
 - `triage_rates_by_metadata.csv` — per-group rates with Wilson CIs, groups below the size floor kept and marked
 - `site_detail.csv`, `design_confounding.csv`, `balance_*.csv`, `unlabelled_wells.csv`
 
-> **Status (2026-07-30):** on the 50-plate run the read flag's apparent site and
-> diagnosis associations are **entirely read depth** (site keeps 13% of its
-> deviance after adjustment), while the **IC axis** carries mutually independent
-> associations with site (p = 0.046), ancestry (p = 0.016) and age (p = 0.030).
-> It also **corrects** `Triage_Review` §5: the 40%-triage site is 2 wells of 5.
+> Each run's findings go to `output_files/triage_metadata_report_<run>.html`,
+> not into the README. Supersedes `Triage_Review` §5 on the site question.
 
 > ⚠️ **The other modules below are documented; `Extremes/`, `Specimen_Quality/`,
 > `Detectability_LOD/` and `Triage_Review/` are not yet listed here.** See each

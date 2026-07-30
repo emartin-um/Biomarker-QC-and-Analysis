@@ -146,17 +146,14 @@ site deviance explained (41.4 → 46.1). Read flags by site are not significant
 result is positional:
 
 > ⚠️ **Superseded on the site question — see `Secondary_QC/Triage_Metadata/`
-> (2026-07-30).** That 40.0% is **2 wells out of 5**, with a 95% Wilson interval
-> of [11.8%, 76.9%]. With a size floor at n = 20 the maximum-rate test is **not**
-> significant (5.32%, p = 0.40); what survives is a *diffuse* association across
-> 19 sites (omnibus deviance 30.6, p = 0.039), marginal within plate (p = 0.063).
-> The lesson is about the statistic: **a maximum-rate test keys on the extreme,
-> and a group of 5 can supply an extreme from noise.** The positional finding
-> below is unaffected — it rests on 50 observations of one position, not 5.
+> (2026-07-30).** That 40.0% rests on a handful of wells at one small site, and a
+> maximum-rate statistic keys on exactly that kind of extreme. With a size floor
+> and an omnibus statistic alongside the maximum, the site picture changes; that
+> module also separates site from read depth, ancestry and age, which this one
+> did not attempt. **Read its per-run report for the current numbers.**
 >
-> `Triage_Metadata` also shows the read-flag/site relationship is entirely read
-> depth, and finds mutually independent site, ancestry and age associations on
-> the IC axis that this module did not test for.
+> The positional finding below is unaffected — it rests on 50 observations of one
+> position, not on a small site.
 
 > **Well F7 is triaged in 9 of its 50 plate-bays — 18.0%, against 1.64% at every
 > other position.** Permutation on the maximum per-position count: observed 9,

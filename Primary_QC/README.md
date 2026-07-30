@@ -71,25 +71,35 @@ Four things it surfaces that a pass/fail count hides:
 
 | | |
 |---|---|
-| **INERT gates** | A gate firing on **zero** wells has not been shown to be safe — it has not been *tested*. Headroom to each cut is now printed beside the count, so "correctly found nothing" and "cannot fire" can be told apart. On the 50-plate run: PCA round 2, the bad-data check, and Alamar's `IC Reads < 1000`. |
-| **The read gate is one-sided** | Its lower bound is not plate-relative on any real run and **cannot be made so**. Within-plate read spread is Q3/Q1 ≈ 2.9, so any fence wide enough to avoid flagging ~25% of a plate falls below the physical floor. §D.2.4 shows four alternatives failing — a log2 fence guts the upper side (94 flags → 3), a −40% bound flags 1031 wells. It is now *described* as a plate-relative high flag plus an absolute floor, which is what it has always been. |
-| **The IC gate is a vendor metric re-derived** | We test `IC Reads` against 0.6–1.4× the plate median; Alamar's `IC Median` is the same check on the same quantity (Jaccard 0.966). It supplies ~¾ of all triage. A useful cross-check — **not** an independent in-house line of evidence, and methods text should not present it as one. |
-| **`FDR_threshold` is not a dial** | The p-value is Poisson-binomial on an **integer** anchor count, so the FDR takes only 14 distinct values across 4200 wells. "FDR < 0.01" *is* "5 or more of 18 anchors out". §D.2.2 prints every setting that exists; between adjacent rows there is nothing to tune. |
+| **INERT gates** | A gate firing on **zero** wells has not been shown to be safe — it has not been *tested*. Headroom to each cut is printed beside the count, so "correctly found nothing" and "cannot fire" can be told apart. |
+| **The read gate is one-sided** | Its lower bound is not plate-relative on any real run and **cannot be made so**: within-plate read spread is wide enough that any fence avoiding a mass of false flags falls below the physical floor. §D.2.4 records the alternatives that were tested and why each fails. The gate is *described* as a plate-relative high flag plus an absolute floor, which is what it has always been; behaviour is unchanged. |
+| **The IC gate is a vendor metric re-derived** | We test `IC Reads` against 0.6–1.4× the plate median; Alamar's `IC Median` is the same check on the same quantity. §D.2.3 measures the agreement each run and returns a verdict. A useful cross-check — **not** an independent in-house line of evidence, and methods text should not present it as one. |
+| **`FDR_threshold` is not a dial** | The p-value is Poisson-binomial on an **integer** anchor count, so the FDR takes only a handful of distinct values. "FDR < x" really means "k or more anchors out". §D.2.2 prints every setting that exists; between adjacent rows there is nothing to tune. |
 
-**Per-axis triage flags.** `samples_to_triage.csv` now carries `tri_IC`,
-`tri_PCA`, `tri_burden`, `tri_bad_data` and `n_axes`. A report that assigns one
-reason per well by precedence is a valid *partition* — the loss must sum — but
-its per-axis numbers are **not axis totals**. On the 50-plate run precedence
-undercounts the PCA axis by 37.5% and the burden axis by 64%. Use the booleans
-for "how many wells did this screen catch"; use precedence only when the parts
-must sum to the whole.
+**Per-axis triage flags.** `samples_to_triage.csv` carries `tri_IC`, `tri_PCA`,
+`tri_burden`, `tri_bad_data` and `n_axes`. A report that assigns one reason per
+well by precedence is a valid *partition* — the loss must sum — but its per-axis
+numbers are **not axis totals**, and the gap can be large. Use the booleans for
+"how many wells did this screen catch"; use precedence only when the parts must
+sum to the whole. §D.5 prints both side by side.
 
 **Plate position — and the other meaning of "site".** §D.5.4 tests whether a
 *physical well position* is triaged more often than chance across plates, by
-permutation within plate-bay (a chi-square is wrong here: triage counts over ~84
-positions leave most cells at 0 or 1). This is invisible to every other screen,
-because they all compare a well only to its own plate — a bad position is a
-layout or hardware problem, not a specimen problem.
+permutation within plate-bay (a chi-square is wrong here: triage counts spread
+over ~84–96 positions leave most cells at 0 or 1). This is invisible to every
+other screen, because they all compare a well only to its own plate — a bad
+position is a layout or hardware problem, not a specimen problem.
+
+The spatial tests are **layout-agnostic and name no region in advance**: a row
+gradient, a column gradient, an edge-vs-interior contrast, and a descriptive
+report of the worst quadrant. To *test* a specific region, set `prior_region` in
+§A.3 and run on the **next** dataset — testing a region chosen by looking at the
+same data is a search result dressed as a p-value, and the pipeline will not do
+it for you.
+
+> **Findings live in the rendered report, not here.** Each run's HTML
+> (`QC_Pipeline_Primary_Alamar_<NPQ>.html`) carries §D.0 and §D.5 with that run's
+> numbers.
 
 > **Clustering by clinical collection site is a different question**, and it
 > cannot be asked here: Primary QC is agnostic to phenotype and covariates by

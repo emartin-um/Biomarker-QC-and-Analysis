@@ -36,15 +36,29 @@ RUN_ROOT <- normalizePath(file.path(HERE, "..", ".."), mustWork = FALSE)
 OUT_DIR  <- file.path(HERE, "output_files")
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 source(file.path(HERE, "triage_metadata_helpers.R"))
+source(file.path(HERE, "triage_metadata_report.R"))
 
 PQ      <- file.path(RUN_ROOT, "Primary_QC")
 MM_ROOT <- file.path(RUN_ROOT, "Metadata_Merge")
 .rd <- function(...) { p <- file.path(...); if (file.exists(p))
   utils::read.csv(p, stringsAsFactors = FALSE, check.names = FALSE) else NULL }
 
-MIN_N  <- 20L      # site/group size floor. Below it, a rate is noise -- but the
-                   # groups below the floor are still reported, never dropped.
-N_PERM <- 10000L
+# ---------------------------------------------------------------------------
+# Settings. Nothing below this block is specific to any one study.
+# ---------------------------------------------------------------------------
+MIN_N  <- 20L            # group size floor. Below it a rate is noise -- but the
+                         # groups below the floor are still REPORTED, never dropped.
+N_PERM <- 10000L         # permutation replicates
+AGE_BREAKS <- c(60, 70, 80)   # age-band cutpoints; widen for a younger cohort
+
+# Metadata columns to test, as name = column-in-the-merge. Add or remove freely;
+# a column that is absent, constant, or all-NA is skipped with a note rather than
+# erroring, so this list does not have to match every study's merge exactly.
+GROUP_VARS <- c(Site = "Site", Diagnosis = "Case_Control", sex = "sex",
+                Ancestry = "<derived>", age_band = "<derived>")
+
+# Continuous covariates for the balance table.
+BALANCE_CONTINUOUS <- c("age", "BMI", "l2reads", "mean_INT_z")
 
 cat("=========================================================\n")
 cat(" Triage/flag decisions vs specimen metadata\n")
@@ -105,12 +119,23 @@ MM_DIR <- mm[which.max(file.mtime(file.path(mm, "metadata_PrimaryQC_refreshed.cs
 md <- .rd(MM_DIR, "metadata_PrimaryQC_refreshed.csv")
 k <- match(d$well_id, md$SAMPLE_ALIQUOT)
 
-d$Site      <- .blank_to_na(if ("Site" %in% names(md)) md$Site[k] else NA)
-d$Diagnosis <- collapse_diagnosis(if ("Case_Control" %in% names(md)) md$Case_Control[k] else NA)
-d$sex       <- .blank_to_na(if ("sex" %in% names(md)) md$sex[k] else NA)
-d$age       <- .num(if ("age_at_subject" %in% names(md)) md$age_at_subject[k] else NA)
-d$age_band  <- age_band(d$age)
-d$BMI       <- .num(if ("BMI" %in% names(md)) md$BMI[k] else NA)
+.col <- function(nm) if (nm %in% names(md)) md[[nm]][k] else rep(NA, length(k))
+
+# Diagnosis uses the merge's own curated CDX table when present. `CDX` is the
+# column that table is keyed on; `Case_Control` is the fallback.
+cdxrev <- .rd(dirname(MM_DIR), "review", "CDX_review.csv")
+if (is.null(cdxrev)) cdxrev <- .rd(MM_ROOT, "review", "CDX_review.csv")
+.dx_src <- if (!is.null(cdxrev) && "CDX" %in% names(md)) "CDX" else GROUP_VARS[["Diagnosis"]]
+d$Diagnosis <- collapse_diagnosis(.col(.dx_src),
+                                  cdx_review = if (.dx_src == "CDX") cdxrev else NULL)
+cat(sprintf("Diagnosis collapsed from `%s` using %s.\n", .dx_src,
+            if (.dx_src == "CDX") "review/CDX_review.csv" else "the fallback matcher"))
+
+d$Site      <- .blank_to_na(.col(GROUP_VARS[["Site"]]))
+d$sex       <- .blank_to_na(.col(GROUP_VARS[["sex"]]))
+d$age       <- .num(.col("age_at_subject"))
+d$age_band  <- age_band(d$age, AGE_BREAKS)
+d$BMI       <- .num(.col("BMI"))
 d$has_meta  <- !is.na(k)
 
 # Ancestry comes from the merge's own curated rule table, not from a second
@@ -175,6 +200,14 @@ AXES <- list(
   "read flag"   = d$read_flagged)
 GROUPS <- list(Site = d$Site, Diagnosis = d$Diagnosis, sex = d$sex,
                Ancestry = d$Ancestry, age_band = d$age_band)
+# A variable that is absent, all-NA, or constant cannot be tested. Drop it here
+# with a note, so a study whose merge lacks one of these still runs.
+.usable <- vapply(GROUPS, function(v)
+  sum(!is.na(v)) >= MIN_N && length(unique(stats::na.omit(v))) >= 2, logical(1))
+if (any(!.usable))
+  cat(sprintf("Not testable on this run (absent, constant, or all missing): %s\n",
+              paste(names(GROUPS)[!.usable], collapse = ", ")))
+GROUPS <- GROUPS[.usable]
 
 ## 4a. per-group rates, with CIs and the below-floor groups kept visible
 cat("--- rates by group ------------------------------------------------------\n")
@@ -286,10 +319,7 @@ cat("--- mutual adjustment: each label given the others -----------------------\
 adj_rows <- list()
 for (an in names(AXES)) {
   if (sum(AXES[[an]], na.rm = TRUE) < 5) next
-  ma <- mutual_adjustment(AXES[[an]],
-                          list(Site = d$Site, Ancestry = d$Ancestry,
-                               Diagnosis = d$Diagnosis, age_band = d$age_band),
-                          min_n = MIN_N, depth = d$l2reads)
+  ma <- mutual_adjustment(AXES[[an]], GROUPS, min_n = MIN_N, depth = d$l2reads)
   if (is.null(ma)) next
   ma$axis <- an
   adj_rows[[length(adj_rows) + 1]] <- ma
@@ -344,11 +374,11 @@ if (nrow(cc) > 20) {
 cat("\n")
 
 ## --- 7. who got removed vs who stayed ----------------------------------------
-bal <- balance_table(d, d$triaged, continuous = c("age", "BMI", "l2reads", "mean_INT_z"),
-                     categorical = c("sex", "Diagnosis", "Ancestry"))
+.bal_cont <- intersect(BALANCE_CONTINUOUS, names(d))
+.bal_cat  <- setdiff(names(GROUPS), "Site")   # Site has its own per-site table
+bal <- balance_table(d, d$triaged, continuous = .bal_cont, categorical = .bal_cat)
 utils::write.csv(bal, file.path(OUT_DIR, "balance_triaged_vs_retained.csv"), row.names = FALSE)
-balf <- balance_table(d, d$read_flagged, continuous = c("age", "BMI", "l2reads", "mean_INT_z"),
-                      categorical = c("sex", "Diagnosis", "Ancestry"))
+balf <- balance_table(d, d$read_flagged, continuous = .bal_cont, categorical = .bal_cat)
 utils::write.csv(balf, file.path(OUT_DIR, "balance_flagged_vs_unflagged.csv"), row.names = FALSE)
 
 cat("--- balance: triaged vs retained (|std diff| >= 0.10 shown) --------------\n")
@@ -361,12 +391,10 @@ if (nrow(bb)) {
 cat("\n")
 
 ## --- 8. the diagnosis collapse, written out so it can be argued with ---------
-if ("Case_Control" %in% names(md)) {
-  cm <- collapse_map(md$Case_Control[k])
-  utils::write.csv(cm, file.path(OUT_DIR, "diagnosis_collapse_map.csv"), row.names = FALSE)
-  cat(sprintf("--- diagnosis collapse: %d raw values -> %d levels (see diagnosis_collapse_map.csv)\n\n",
-              nrow(cm), length(unique(cm$collapsed))))
-}
+cm <- collapse_map(.col(.dx_src), cdx_review = if (.dx_src == "CDX") cdxrev else NULL)
+utils::write.csv(cm, file.path(OUT_DIR, "diagnosis_collapse_map.csv"), row.names = FALSE)
+cat(sprintf("--- diagnosis collapse: %d raw values -> %d levels via %s (see diagnosis_collapse_map.csv)\n\n",
+            nrow(cm), length(unique(cm$collapsed)), cm$source[1]))
 
 ## --- 9. per-site detail for follow-up ----------------------------------------
 # One row per site with every axis side by side, so a site conversation has the
@@ -427,6 +455,18 @@ if (!is.null(adj)) {
   cat("explain more once the others absorb variation it was competing with.\n")
 }
 cat("\n")
+
+## --- 11. the run's findings as a standalone HTML ------------------------------
+# Findings belong in a per-run report, not in the module's README — a README that
+# reports results is out of date the moment it meets a different dataset.
+run_label <- basename(RUN_ROOT)
+rpt <- file.path(OUT_DIR, sprintf("triage_metadata_report_%s.html", run_label))
+write_triage_metadata_report(
+  path = rpt, run_label = run_label, d = d, unl = unl, conf = conf, rates = rates,
+  tests = tests, adj = adj, bal = bal, cm = cm, sd_rows = sd_rows,
+  min_n = MIN_N, n_perm = N_PERM, dx_source = cm$source[1],
+  generated = format(Sys.time(), "%Y-%m-%d %H:%M"))
+cat(sprintf("Report: %s\n\n", rpt))
 
 cat("Wrote to output_files/:\n")
 for (f in sort(list.files(OUT_DIR, pattern = "\\.csv$")))

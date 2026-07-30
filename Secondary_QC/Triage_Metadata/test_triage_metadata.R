@@ -149,22 +149,47 @@ ok("the proxy does not", ps[["shadow"]] > 0.05, sprintf("p = %.3g", ps[["shadow"
 ok("adjusted p-values are valid", all(ma$p_given_others >= 0 & ma$p_given_others <= 1))
 
 # =============================================================================
-section("7. Diagnosis collapse — administrative values stay separate")
+section("7. Diagnosis collapse — the curated table drives it")
 # =============================================================================
-raw <- c("Case", "AD", "Control", "NCI", "MCI", "Missing", "Insufficient Data",
-         "Dementia Vascular", "Lewy Body", NA)
-cd2 <- collapse_diagnosis(raw)
-ok("Case and AD collapse together", cd2[1] == cd2[2])
-ok("Control and NCI collapse together", cd2[3] == cd2[4])
-ok("'Missing' is its own level, not folded into Control",
-   cd2[6] == "Not codeable" && cd2[6] != cd2[3])
-ok("'Insufficient Data' is not clinical", cd2[7] == "Not codeable")
-ok("NA becomes an explicit level rather than vanishing", !is.na(cd2[10]))
+# The intended path: the merge's own CDX_review.csv. Its `NA` rows mean "exclude
+# from the analysis cohort" — this module must keep those wells, as their own
+# level, because an excluded well was still either triaged or not.
+rev_cdx <- data.frame(
+  CDX = c("NCI", "MCI", "AD", "Dementia Vascular", "Missing", "Insufficient Data", "Other"),
+  FINAL_CDX_collapsed = c("NCI", "MCI", "AD", "Dementia_Other", NA, NA, NA),
+  stringsAsFactors = FALSE)
+raw <- c("AD", "NCI", "MCI", "Missing", "Insufficient Data", "Dementia Vascular",
+         "Other", "Never seen before", NA)
+cd2 <- collapse_diagnosis(raw, cdx_review = rev_cdx)
+ok("a curated level is used verbatim", cd2[1] == "AD" && cd2[2] == "NCI")
+ok("a curated collapse is applied", cd2[6] == "Dementia_Other")
+ok("cohort-EXCLUDED levels are kept, not dropped",
+   cd2[4] == "Not codeable" && cd2[5] == "Not codeable" && cd2[7] == "Not codeable")
+ok("an excluded level is NOT folded into a clinical one", cd2[4] != cd2[2])
+ok("a value absent from the table still gets a level", cd2[8] == "Not codeable")
+ok("NA becomes an explicit level rather than vanishing", !is.na(cd2[9]))
 ok("no input is left unmapped", !any(is.na(cd2)))
-ok("dementia subtypes group together", cd2[8] == "Other dementia" && cd2[9] == "Other dementia")
 
-cm <- collapse_map(raw)
+cm <- collapse_map(raw, cdx_review = rev_cdx)
 ok("the collapse map accounts for every input row", sum(cm$n_wells) == length(raw))
+ok("the map records which mapping was used", all(cm$source == "CDX_review.csv"))
+
+# The fallback matcher, used only when no review table exists.
+cf <- collapse_diagnosis(c("AD", "NCI", "Lewy Body", "Missing"), cdx_review = NULL)
+ok("fallback still maps the common levels", cf[1] == "Case (AD)" && cf[2] == "Control")
+ok("fallback groups dementia subtypes", cf[3] == "Dementia_Other")
+ok("fallback marks itself in the map",
+   collapse_map("AD", NULL)$source[1] == "fallback matcher")
+
+# =============================================================================
+section("7b. Age bands are a parameter, not a constant")
+# =============================================================================
+ab <- age_band(c(55, 65, 75, 85, NA))
+ok("default bands split at 60/70/80",
+   identical(ab, c("<60", "60-69", "70-79", "80+", NA_character_)))
+ok("NA age stays NA", is.na(ab[5]))
+ab2 <- age_band(c(40, 55, 70), breaks = c(50, 65))
+ok("custom cutpoints are honoured", identical(ab2, c("<50", "50-64", "65+")))
 
 # =============================================================================
 section("8. Ancestry comes from the curated table, never from a guess")
@@ -258,8 +283,20 @@ if (!file.exists(f_tests)) {
        any(ad$variable == "log2(reads)"))
     ok("mutual adjustment covers more than one label",
        length(unique(ad$variable)) >= 3)
-    ok("adjusted deviance never exceeds the total available",
-       all(ad$dev_given_others >= -1e-6))
+    ok("adjusted deviance is never negative (IRLS noise is clamped)",
+       all(ad$dev_given_others >= 0))
+    ok("retained share is never negative", all(is.na(ad$retained_share) |
+                                                 ad$retained_share >= 0))
+  }
+
+  rpt <- list.files(OUT, pattern = "^triage_metadata_report_.*\\.html$", full.names = TRUE)
+  ok("a per-run HTML report was written", length(rpt) == 1, paste(basename(rpt), collapse = ", "))
+  if (length(rpt) == 1) {
+    h <- paste(readLines(rpt[1], warn = FALSE), collapse = "\n")
+    ok("the report is a complete standalone document",
+       grepl("<!doctype html>", h, ignore.case = TRUE) && grepl("</html>", h))
+    ok("the report states it changes nothing", grepl("Diagnostic only", h, ignore.case = TRUE))
+    ok("the report carries the tests, not just prose", grepl("p_deviance", h))
   }
 
   cf <- utils::read.csv(file.path(OUT, "design_confounding.csv"), stringsAsFactors = FALSE)
