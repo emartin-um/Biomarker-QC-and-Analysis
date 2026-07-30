@@ -272,6 +272,7 @@ rsc <- if (!is.null(rs)) attr(rs, "conditioned") else NULL
 wr(rs, "triage_rate_by_site.csv")
 rf <- rate_by_group(d$read_flagged, d$Site, d$l2reads)
 rfp <- if (!is.null(rf)) attr(rf, "perm") else NULL
+rfc <- if (!is.null(rf)) attr(rf, "conditioned") else NULL
 wr(rf, "read_flag_rate_by_site.csv")
 
 ## 5h. the per-well detail sheet
@@ -427,12 +428,17 @@ report_group <- function(lbl, pp, cond) {
   if (pp$smallest_group_n < 20)
     cat(sprintf("    NOTE smallest retained group is n = %d; a maximum-rate statistic is\n         unreliable there, which is why the omnibus is reported beside it.\n",
                 pp$smallest_group_n))
-  if (!is.null(cond))
+  if (!is.null(cond)) {
     cat(sprintf("    deviance explained: %.1f alone -> %.1f after read depth\n",
                 cond$dev_group_only, cond$dev_group_given_depth))
+    keep <- 100 * cond$dev_group_given_depth / max(cond$dev_group_only, 1e-9)
+    cat(sprintf("      -> %.0f%% retained; %s\n", keep,
+                if (keep < 50) "mostly depth composition, not a site property"
+                else "survives depth, so not simply composition"))
+  }
 }
 report_group("triage by site", rsp, rsc)
-report_group("read flags by site", rfp, NULL)
+report_group("read flags by site", rfp, rfc)
 
 cat("\n🚫 DIAGNOSTIC ONLY. Nothing here is a drop rule, and nothing here proposes\n")
 cat("   one. A gate that fires on nobody has not been shown to be safe — only\n")

@@ -150,17 +150,23 @@ common covariate will not absorb it identically across the panel.
 
 Over the 19 sites with n ≥ 20 (4 smaller sites excluded, and named in the output):
 
-| | omnibus deviance | omnibus p | max rate | max-rate p |
-|---|---:|---:|---:|---:|
-| triage | 30.6 | **0.039** | 5.3% | 0.40 |
-| read flags | 78.1 | **0.0001** | 15.0% | 0.003 |
+| | omnibus deviance | omnibus p | max rate | max-rate p | after depth |
+|---|---:|---:|---:|---:|---:|
+| triage | 30.6 | **0.039** | 5.3% | 0.40 | 34.5 (**113%** retained) |
+| read flags | 78.1 | **0.0001** | 15.0% | 0.003 | 20.7 (**26%** retained) |
 
-- **Triage** is a weak, diffuse association across sites rather than one bad site,
-  and it is **not** depth composition — conditioning on read depth leaves it
-  slightly larger (deviance 30.6 → 34.5).
-- **Read flags** are strongly site-structured, which the old maximum-rate test
-  missed entirely (it reported p = 0.165). Since the flag is essentially a depth
-  threshold and depth is ~37% a site property, that is the expected direction.
+The two behave oppositely once depth is partialled out, and that is the useful part:
+
+- **Triage** is a weak, diffuse association across sites rather than one bad site
+  — and it is **not** depth composition. Conditioning on read depth leaves it
+  slightly larger. The top site is now MCRH at 5.3% (5 of 94), with no single
+  site standing out (max-rate p = 0.40).
+- **Read flags** look strongly site-structured, but **26% of that survives depth**
+  — so it is mostly which sites submit deep samples, not a site QC problem. The
+  top site is MULH at 15.0% (12 of 80), which is the deepest site in the study
+  (~14M reads). Since the flag is a depth threshold, that is the expected
+  direction. The old maximum-rate test missed this association entirely
+  (p = 0.165).
 
 The statistic mattered in both directions: it manufactured a triage signal that
 is not there and hid a read-flag signal that is. The positional finding below is
