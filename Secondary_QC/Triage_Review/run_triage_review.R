@@ -209,9 +209,12 @@ wr(rg, "read_gate_geometry.csv")
 ## 5e. the removed/marked wells against the known quality axes, PER CLASS
 classes <- list(
   "triaged (all)"      = d$triaged,
+  "low reads (any)"    = d$tri_low_reads,
+  "low reads only"     = d$tri_low_reads & d$tri_n_axes == 1,
   "IC only"            = d$tri_IC & d$tri_n_axes == 1,
   "PCA (any)"          = d$tri_PCA,
   "burden (any)"       = d$tri_burden,
+  "burden, not low-read" = d$tri_burden & !d$tri_low_reads,
   "read-flagged HIGH"  = d$read_flag_dir == "HIGH",
   "vendor warning"     = d$alamar_warning)
 AXES <- c("mean_INT_z", "l2reads", "Detectability", "IC_Median", "hemolysis_INT", "CST3",
@@ -278,7 +281,7 @@ wr(rf, "read_flag_rate_by_site.csv")
 ## 5h. the per-well detail sheet
 det <- d[d$triaged | d$read_flagged | d$alamar_warning, ]
 keep <- intersect(c("well_id","Run","Bay","wellRow","wellCol","year","Site",
-                    "triaged","tri_IC","tri_PCA","tri_burden","tri_baddata","tri_n_axes",
+                    "triaged","tri_low_reads","tri_IC","tri_PCA","tri_burden","tri_baddata","tri_n_axes",
                     "read_flagged","read_flag_dir","alamar_warning",
                     "IC_Median","Detectability","IC_Reads","Reads","l2reads",
                     "mean_INT_z","hemolysis_INT","CST3","n_out_tot","fdr_min",

@@ -143,7 +143,13 @@ ranked <- plotdat %>% left_join(bounds %>% select(all_of(gkey), genotype_median)
 high_spread_plates <- if (has_run) grp %>% filter(high_spread) %>%
     transmute(RUN, genotype = APOEgeno, n = n_grp, plate_IQR = round(iqr,1),
               typical_IQR = round(typ_iqr,1), ratio = round(iqr/typ_iqr,1)) %>% arrange(desc(ratio)) else grp[0,]
-if (has_run && nrow(high_spread_plates)) write_xlsx(high_spread_plates, file.path(OUT, "high_spread_plates.xlsx"))
+# Write UNCONDITIONALLY (fixed 2026-09-01). Guarding this on nrow() > 0 meant a run that found no
+# high-spread bands left the PREVIOUS run's file sitting in output_files/, so a clean re-run silently
+# inherited a stale alarm. Hit for real: after the WGS midi re-map the six flagged October-2025 bands
+# dropped to zero, but high_spread_plates.xlsx still showed the six from the un-remapped run (8 minutes
+# older than every sibling output). An empty table is a result — "no high-spread bands" — and must be
+# recorded as one.
+if (has_run) write_xlsx(high_spread_plates, file.path(OUT, "high_spread_plates.xlsx"))
 cat(if (has_run)
   sprintf("Outlier bands are **per-plate** (each run-bay vs. itself; QC, not genotype-calling), but a plate whose within-genotype spread is >%d× the typical plate is treated as **high-spread/problematic** and is scored against a **clean reference band** (built from normal-spread plates) instead of self-banding — so a scrambled plate's off-band samples are flagged here, not hidden. Normal plates keep their own band with the width floored at the clean reference (tight clusters can't over-flag).\n\n", SPREAD_FACTOR)
   else "Per-genotype bands (single batch — no `RUN` column).\n\n")

@@ -73,6 +73,11 @@ if (!is.null(w)) {
                   triaged = as.logical(w$triaged), read_flagged = as.logical(w$read_flagged),
                   tri_IC = as.logical(w$tri_IC), tri_PCA = as.logical(w$tri_PCA),
                   tri_burden = as.logical(w$tri_burden),
+                  # tri_low_reads (2026-09-01 read-depth screen). Prefer the column; runs whose
+                  # Primary QC predates it still carry the reason string, so derive it from there
+                  # rather than reporting the axis as empty.
+                  tri_low_reads = if ("tri_low_reads" %in% names(w)) as.logical(w$tri_low_reads)
+                                  else grepl("Low read depth", as.character(w$Reason), fixed = TRUE),
                   mean_INT_z = .num(w$mean_INT_z), stringsAsFactors = FALSE)
 } else {
   # Older runs: rebuild the same columns so this module still works on them.
@@ -101,7 +106,8 @@ if (!is.null(w)) {
     triaged = q[["Sample Name"]] %in% tri$SampleID,
     read_flagged = if (is.null(fro)) FALSE else q[["Sample Name"]] %in% fro$SampleID,
     tri_IC = grepl("IC outlier", rs), tri_PCA = grepl("PCA", rs),
-    tri_burden = grepl("burden", rs), mean_INT_z = NA_real_,
+    tri_burden = grepl("burden", rs),
+    tri_low_reads = grepl("Low read depth", rs, fixed = TRUE), mean_INT_z = NA_real_,
     stringsAsFactors = FALSE)
 }
 d$plate   <- paste(d$Run, d$Bay)
@@ -194,6 +200,7 @@ cat("\n")
 # lump would average three different screens into one uninterpretable number.
 AXES <- list(
   "any triage"  = d$triaged,
+  "low reads"   = d$tri_low_reads,
   "IC"          = d$tri_IC,
   "PCA"         = d$tri_PCA,
   "burden"      = d$tri_burden,

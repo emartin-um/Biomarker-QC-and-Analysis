@@ -198,6 +198,34 @@ frozen_scaffold <- c("CCL2","CCL22","CCL3","CCL4","CHI3L1","CNTN2","CXCL8","DDC"
 # WATCH (kept, flagged); below drop it is a DROP (not used as an anchor on this run, flagged).
 scaffold_watch <- min_detectability_qc   # 98 — the selection bar
 scaffold_drop  <- 90
+
+# --- Well-level read-depth screen (C.1 / D.3) ---------------------------------------------------
+# A well that failed to sequence still occupies a column in the export, and Alamar's
+# `targetDetectability` is computed over ALL wells. So a handful of dead wells drags EVERY target's
+# per-plate detectability down by (dead / total) and can empty the QC anchor set — which then
+# prevents the very sample triage that would have removed those wells (2026-09-01: 3 plates with
+# a handful of dead wells on a few plates took a large combined run from 18/21 frozen anchors to 1/21,
+# and 55 qualifying biomarkers down to 4).
+#
+# The screen is on READ DEPTH, never on detectability: detectability moves when LODs move, so
+# filtering on it is unstable across lots and assay versions. The bar is the vendor's own `Reads`
+# minimum, parsed from the export preamble (`vendor_thresholds$reads_min`, 500,000) — not a number
+# of ours.
+#
+# Screened wells are NOT deleted. They ride through the pipeline and exit via the normal D.3 triage
+# on a `Low read depth` axis, so they land in `samples_to_triage.csv` and the `*_post_QC_triage.csv`
+# datasets with their biomarker values intact, ready for Metadata_Merge and the Secondary_QC
+# Triage_Metadata / Triage_Review modules.
+apply_read_floor <- TRUE
+
+# How per-plate target detectability is obtained:
+#   "recompute" : mean(NPQ >= targetLOD_NPQ) per (plate, target) over retained study-sample wells.
+#                 Reproduces the vendor column to ~0.17 percentage points when no wells are screened
+#                 (validated 2026-09-01, 67 plates), and is the only option that can honour the
+#                 read floor, since the vendor column is precomputed over every well.
+#   "vendor"    : the `targetDetectability` column as shipped, via biomarker_detectability.csv
+#                 (pre-2026-09-01 behaviour; ignores apply_read_floor).
+detect_source <- "recompute"
 ```
 ---
   
@@ -328,6 +356,34 @@ meta_df <- alamar_qc %>%
     Bay = stringr::str_extract(plateID, "Bay[0-9]+")
   ) %>%
   transmute(SampleID = `Sample Name`, Run, Bay)
+
+# --- Well-level read-depth screen ---------------------------------------------
+# Wells below the vendor's own `Reads` floor. Identified here (before C.1) because the
+# detectability denominator must exclude them; they are removed from the analysis set only later,
+# by the normal D.3 triage, so their data survives into the triage outputs. See A.3.
+low_read_samples <- character(0)
+if (isTRUE(apply_read_floor) && "Reads" %in% names(alamar_qc)) {
+  # Study samples only. Negative controls are SUPPOSED to sequence shallow — every NC well sits below
+  # the floor, so sweeping them in inflates the count by one NC per plate and buries the real failures.
+  # Controls are pulled out separately in B.1.1 and are not triaged here.
+  low_read_tbl <- alamar_qc %>%
+    { if ("Sample Type" %in% names(.)) filter(., `Sample Type` == "Sample") else . } %>%
+    filter(!is.na(Reads), Reads < vendor_thresholds$reads_min) %>%
+    left_join(meta_df, by = c("Sample Name" = "SampleID")) %>%
+    transmute(SampleID = `Sample Name`, Run, Bay,
+              Well = if ("AUTO_WELLPOSITION" %in% names(.)) AUTO_WELLPOSITION else NA_character_,
+              SampleType = if ("Sample Type" %in% names(.)) `Sample Type` else NA_character_,
+              Reads, `IC Reads`, `IC Median`, Detectability, `QC Status`) %>%
+    arrange(Run, Bay, Well)
+
+  low_read_samples <- low_read_tbl$SampleID
+  write_csv(low_read_tbl, "output_files/low_read_wells.csv")
+
+  message(sprintf(
+    "Read-depth screen: %d well(s) below the vendor Reads floor of %s (%d flagged Warning by Alamar's own QC). Excluded from the detectability denominator; triaged in D.3 on the 'Low read depth' axis.",
+    nrow(low_read_tbl), format(vendor_thresholds$reads_min, big.mark = ",", scientific = FALSE),
+    sum(low_read_tbl$`QC Status` != "Passed", na.rm = TRUE)))
+}
 
 # Keep only samples present in combined_df
 meta_df <- meta_df[meta_df$SampleID %in% rownames(combined_df), ]
@@ -505,8 +561,78 @@ Keep only biomarkers with >98% detectability on every plate for the QC Dataset. 
 ```{r detectability-filtering, message=FALSE, warning=FALSE, echo=TRUE, results='asis'}
 library(tidyverse)
 
-# Read detectability
-detect <- read_csv("input_files/biomarker_detectability.csv", show_col_types = FALSE)
+# Read detectability (vendor's precomputed targetDetectability, pivoted by plate)
+detect_vendor <- read_csv("input_files/biomarker_detectability.csv", show_col_types = FALSE)
+detect <- detect_vendor
+
+# --- Recompute detectability over retained wells ------------------------------------------------
+# The vendor column is computed over every well, so dead wells depress every target on that plate.
+# Recompute as mean(NPQ >= targetLOD_NPQ) per (plate, target) across the study-sample wells that
+# clear the read floor. `combined_df` here is already study samples only (controls and HIHG
+# replicates were pulled out in B.1.1). See A.3 for why the screen is on reads, not detectability.
+if (identical(detect_source, "recompute")) {
+
+  .annot <- read_csv("input_files/Annotation_Targets.csv", show_col_types = FALSE) %>%
+    mutate(Run = stringr::str_extract(plateID, "^[0-9]{8}-[0-9]{4}"),
+           Bay = stringr::str_extract(plateID, "Bay[0-9]+")) %>%
+    select(targetName, Run, Bay, targetLOD_NPQ) %>%
+    distinct()
+
+  .biom <- setdiff(colnames(combined_df), c("Run", "Bay"))
+  .keep <- setdiff(rownames(combined_df), low_read_samples)
+
+  .long <- combined_df[.keep, , drop = FALSE] %>%
+    tibble::rownames_to_column("SampleID") %>%
+    pivot_longer(all_of(.biom), names_to = "targetName", values_to = "NPQ") %>%
+    inner_join(.annot, by = c("targetName", "Run", "Bay")) %>%
+    filter(!is.na(targetLOD_NPQ))
+
+  .det_long <- .long %>%
+    group_by(Run, Bay, targetName) %>%
+    summarise(pct = 100 * mean(NPQ >= targetLOD_NPQ, na.rm = TRUE), .groups = "drop") %>%
+    mutate(plate = paste(Run, Bay))
+
+  .plates <- sort(unique(.det_long$plate))
+  detect_recomp <- .det_long %>%
+    select(targetName, plate, pct) %>%
+    pivot_wider(names_from = plate, values_from = pct) %>%
+    select(targetName, all_of(.plates)) %>%
+    arrange(match(targetName, detect_vendor$Biomarker)) %>%
+    rename_with(~ sprintf("Plate_%02d", seq_along(.plates)), all_of(.plates)) %>%
+    rename(Biomarker = targetName)
+  detect_recomp$Overall <- round(rowMeans(select(detect_recomp, starts_with("Plate_")), na.rm = TRUE), 1)
+
+  # Carry through any target the vendor lists but the recomputation cannot score (relative-quant
+  # targets have no LOD; mCherry is an internal control absent from the NPQ matrix), so the
+  # rel_quant exemption below still sees them.
+  .missing <- setdiff(detect_vendor$Biomarker, detect_recomp$Biomarker)
+  if (length(.missing)) {
+    .pad <- detect_vendor[detect_vendor$Biomarker %in% .missing, , drop = FALSE]
+    .pad[, setdiff(names(.pad), "Biomarker")] <- NA_real_
+    detect_recomp <- bind_rows(detect_recomp, .pad[, names(detect_recomp)])
+    detect_recomp <- detect_recomp %>% arrange(match(Biomarker, detect_vendor$Biomarker))
+  }
+
+  # Validate the method against the vendor on the wells the vendor itself used (no read floor).
+  .pc <- grep("^Plate_", names(detect_vendor), value = TRUE)
+  .cmp <- inner_join(
+    detect_vendor %>% select(Biomarker, all_of(.pc)) %>%
+      pivot_longer(all_of(.pc), names_to = "Plate", values_to = "vendor"),
+    detect_recomp %>% select(Biomarker, all_of(intersect(.pc, names(detect_recomp)))) %>%
+      pivot_longer(-Biomarker, names_to = "Plate", values_to = "mine"),
+    by = c("Biomarker", "Plate")) %>%
+    filter(!is.na(vendor), !is.na(mine))
+
+  cat(sprintf(
+    "\n> **Detectability recomputed** as `mean(NPQ >= targetLOD_NPQ)` per plate x target over %d of %d study-sample wells (%d below the vendor Reads floor of %s were excluded from the denominator).\n>\n> Agreement with the vendor's shipped `targetDetectability` across %s comparable cells: mean |diff| **%.2f** pp, max **%.2f** pp.\n\n",
+    length(.keep), nrow(combined_df), length(intersect(low_read_samples, rownames(combined_df))),
+    format(vendor_thresholds$reads_min, big.mark = ",", scientific = FALSE),
+    format(nrow(.cmp), big.mark = ","),
+    mean(abs(.cmp$mine - .cmp$vendor)), max(abs(.cmp$mine - .cmp$vendor))))
+
+  write_csv(detect_recomp, "output_files/biomarker_detectability_recomputed.csv")
+  detect <- detect_recomp
+}
 
 # Keep only the numeric plate columns and overall
 plate_cols <- names(detect)[-1]  # first column is Biomarker name
@@ -644,10 +770,31 @@ qc_pool <- qc_pool[sapply(combined_qc[qc_pool], is.numeric)]
 
 if (identical(scaffold_mode, "frozen")) {
   # ---- Frozen scaffold + per-plate tripwire ----------------------------------------------------------
-  # Anchors = frozen markers that also cleared the standard pool this run (>=98% detect, >500 reads). A
-  # frozen marker below the bar simply can't anchor this batch; the tripwire below surfaces why.
-  anchors  <- intersect(frozen_scaffold, qc_pool)
-  not_pool <- setdiff(frozen_scaffold, anchors)   # frozen markers unavailable as anchors this run
+  # Anchor eligibility — TWO SEPARATE GATES (WATCH tier fixed 2026-09-01):
+  #   raw counts    : a frozen marker under read_count_threshold cannot anchor. Unchanged.
+  #   detectability : the floor for an ANCHOR is `scaffold_drop` (90), NOT the 98% pool bar.
+  #
+  # This previously read `intersect(frozen_scaffold, qc_pool)`, and qc_pool had already removed every
+  # biomarker under `min_detectability_qc` (98) on ANY plate. That made the tripwire's WATCH tier dead
+  # code: a cell in [scaffold_drop, scaffold_watch) is documented as "kept, flagged", but had in fact
+  # been dropped before the tripwire ever ran — detectability-alone filtering of the anchor set, which
+  # is precisely what the frozen scaffold exists to prevent. A marker sitting just under the bar on a
+  # single plate was losing anchor status for the whole run.
+  #
+  # A WATCH anchor sits BELOW the 98% pool bar, so it is deliberately NOT a member of `qc_pool`. It
+  # anchors the sample triage; it does not change which biomarkers reach the post-QC datasets — that
+  # partition stays `qc_pool` (see E.1, which reconstructs it explicitly).
+  pc <- grep("^Plate_", names(detect), value = TRUE)
+  .dmat <- as.matrix(detect[, pc, drop = FALSE]); rownames(.dmat) <- detect$Biomarker
+  .dmin <- apply(.dmat, 1, function(r) if (all(is.na(r))) NA_real_ else min(r, na.rm = TRUE))
+
+  .present  <- intersect(frozen_scaffold, setdiff(colnames(combined_df), c("Run", "Bay")))
+  .ok_reads <- setdiff(.present, low_counts$Biomarker)          # raw-count gate: unchanged
+  anchors   <- .ok_reads[!is.na(.dmin[.ok_reads]) & .dmin[.ok_reads] >= scaffold_drop]
+  not_pool  <- setdiff(frozen_scaffold, anchors)   # frozen markers unavailable as anchors this run
+
+  # Which anchors are being KEPT under the WATCH tier (would have been dropped by the old code)
+  .watch_kept <- anchors[!is.na(.dmin[anchors]) & .dmin[anchors] < scaffold_watch]
 
   # Tripwire: scan every (frozen anchor x plate) detectability cell; alert on anything below the bar.
   pc <- grep("^Plate_", names(detect), value = TRUE)
@@ -662,13 +809,19 @@ if (identical(scaffold_mode, "frozen")) {
   write_csv(tripwire, "output_files/scaffold_tripwire.csv")
 
   independent_biomarkers <- anchors
-  high_cor               <- setdiff(qc_pool, independent_biomarkers)   # added back in E.1 -> content invariant
+  high_cor               <- setdiff(qc_pool, independent_biomarkers)   # display only; E.1 rebuilds from qc_pool
 
-  combined_qc <- combined_qc %>% select(Run, Bay, all_of(independent_biomarkers))
+  # Build the triage matrix from combined_df, not combined_qc: a WATCH anchor is below the 98% pool
+  # bar and so is not a column of combined_qc.
+  combined_qc <- combined_df %>% select(Run, Bay, all_of(independent_biomarkers))
   write.csv(independent_biomarkers, "output_files/QC_Biomarker_Set.csv")
 
   cat(sprintf("**Scaffold mode: FROZEN** — using **%d of %d** frozen anchors for sample triage.\n\n",
               length(independent_biomarkers), length(frozen_scaffold)))
+  if (length(.watch_kept))
+    cat(sprintf("> **WATCH tier active:** %d anchor(s) sit below %g%% on at least one plate but at or above the %g%% drop floor, so they are **kept and flagged** rather than dropped: %s. (Before the 2026-09-01 fix these were silently removed.)\n\n",
+                length(.watch_kept), scaffold_watch, scaffold_drop,
+                paste(sprintf("%s (min %.1f%%)", .watch_kept, .dmin[.watch_kept]), collapse = ", ")))
   if (length(not_pool))
     cat(sprintf("> %d frozen marker(s) not available as anchors this run (absent or below the detectability/read bar): %s\n\n",
                 length(not_pool), paste(not_pool, collapse = ", ")))
@@ -876,12 +1029,50 @@ pca_df <- pca_df %>%
   ) %>%
   ungroup()
 
+# --- COHORT-SCALE COMPANION: a FLAG, never a drop (added 2026-09-01) -----------------------------
+# PC_z above is standardised WITHIN Run x Bay. That is right for finding a lone odd well on an
+# otherwise normal plate, but it SELF-MASKS a cluster: when many wells on one plate fail together
+# they inflate that plate's own sd_PCdist, which is the yardstick they are then measured against.
+#
+# Observed on this run: 30 wells sit at PC1 < -15, all of them ~23x below the cohort median read
+# depth. The per-plate screen caught 9. On the three plates where the failures clustered
+# (5-11 failures each) it caught ZERO, because such a plate carries an sd_PCdist several times the
+# cohort-wide value. The ones it did catch were singletons on otherwise-clean plates. Rescored
+# cohort-wide, the same wells run a median PC_z of ~13.
+#
+# So this adds the cohort-scale score alongside, and a flag for wells extreme on it. It changes NO
+# drop rule: triage still uses `extreme_outlier` only. The point is visibility - a clustered failure
+# should not be able to hide behind the spread it is itself creating.
+pca_df <- pca_df %>%
+  mutate(PC_z_cohort   = (PC_dist - mean(PC_dist, na.rm = TRUE)) / sd(PC_dist, na.rm = TRUE),
+         pca_cohort_flag = PC_z_cohort > PCA_SD,
+         pca_masked_by_plate = pca_cohort_flag & !extreme_outlier)
+
 extreme_samples_round1 <- pca_df$Sample[pca_df$extreme_outlier]
 write_csv(pca_df, "output_files/sample_pca_coordinates_round1.csv")
 
 cat(sprintf("Round 1: %d of %d wells beyond %g SD.  max PC_z = %.3f (headroom %+.3f)\n",
             length(extreme_samples_round1), nrow(pca_df), PCA_SD,
             max(pca_df$PC_z, na.rm = TRUE), max(pca_df$PC_z, na.rm = TRUE) - PCA_SD))
+
+# Report the cohort-scale view next to it, and name the plates doing the masking.
+cat(sprintf("Cohort-scale companion (FLAG ONLY, nothing dropped): %d wells beyond %g SD on the cohort scale; %d of those are NOT per-plate outliers.\n",
+            sum(pca_df$pca_cohort_flag, na.rm = TRUE), PCA_SD,
+            sum(pca_df$pca_masked_by_plate, na.rm = TRUE)))
+if (any(pca_df$pca_masked_by_plate, na.rm = TRUE)) {
+  .masked <- pca_df %>% filter(pca_masked_by_plate) %>%
+    group_by(Run, Bay) %>%
+    summarise(n_masked = n(), plate_sd_PCdist = round(first(sd_PCdist), 2),
+              median_PC_z_plate = round(median(PC_z), 2),
+              median_PC_z_cohort = round(median(PC_z_cohort), 2), .groups = "drop") %>%
+    arrange(desc(n_masked))
+  write_csv(.masked, "output_files/pca_cluster_flags.csv")
+  cat(sprintf("  cohort-wide sd(PC_dist) = %.2f; the plates below exceed it, which is what hides their own wells:\n\n",
+              sd(pca_df$PC_dist, na.rm = TRUE)))
+  print(knitr::kable(.masked,
+        caption = "Wells extreme cohort-wide but NOT flagged on their own plate (a clustered failure masking itself). FLAG ONLY - these are not dropped here; check whether another screen catches them."))
+  cat("\n")
+}
 
 # Variance explained
 var_explained <- summary(pca_res)$importance["Proportion of Variance", 1:2] * 100
@@ -1531,7 +1722,12 @@ upper_sig <- upper_df$SampleID[upper_df$FDR < FDR_threshold]
 lower_sig <- lower_df$SampleID[lower_df$FDR < FDR_threshold]
 outlier_burden_samples <- unique(c(upper_sig, lower_sig))
 
+# Wells below the vendor Reads floor (identified in B; see A.3). Restricted to the analysis set so
+# control wells are not injected into the study-sample triage.
+low_read_triage <- intersect(as.character(low_read_samples), rownames(combined_qc))
+
 triage_df <- bind_rows(
+  tibble(SampleID = low_read_triage, Reason = "Low read depth"),
   tibble(SampleID = as.character(unlist(pca_outliers)), Reason = "PCA outlier"),
   tibble(SampleID = as.character(unlist(outlier_burden_samples)), Reason = "High outlier burden (FDR)"),
   tibble(SampleID = as.character(unlist(IC_outlier_samples)), Reason = "IC outlier"),
@@ -1552,10 +1748,11 @@ triage_df <- triage_df %>%
 # catch", and use `Reason`/precedence only when the parts must sum to the whole.
 tri_ids  <- triage_df$SampleID
 axis_ids <- list(
-  tri_IC       = as.character(unlist(IC_outlier_samples)),
-  tri_PCA      = as.character(unlist(pca_outliers)),
-  tri_burden   = as.character(unlist(outlier_burden_samples)),
-  tri_bad_data = as.character(unlist(bad_samples))
+  tri_low_reads = low_read_triage,
+  tri_IC        = as.character(unlist(IC_outlier_samples)),
+  tri_PCA       = as.character(unlist(pca_outliers)),
+  tri_burden    = as.character(unlist(outlier_burden_samples)),
+  tri_bad_data  = as.character(unlist(bad_samples))
 )
 for (a in names(axis_ids)) triage_df[[a]] <- tri_ids %in% axis_ids[[a]]
 triage_df$n_axes <- rowSums(as.matrix(triage_df[names(axis_ids)]))
@@ -1563,7 +1760,9 @@ triage_df$n_axes <- rowSums(as.matrix(triage_df[names(axis_ids)]))
 triage_df$AlamarWarning <- triage_df$SampleID  %in% warn_samps$`Sample Name`
 
 # Axis totals vs what a one-reason-per-well report would say, side by side.
-prec <- names(axis_ids)   # precedence order: IC > PCA > burden > bad data
+prec <- names(axis_ids)   # precedence order: low reads > IC > PCA > burden > bad data
+# `low reads` leads because it is the least ambiguous cause: a well that did not sequence has no
+# usable signal, so any PCA/burden hit it also earns is a consequence, not a second finding.
 sole_reason <- apply(as.matrix(triage_df[prec]), 1, function(r) prec[which(r)[1]])
 triage_axis_overlap <- tibble(
   axis            = prec,
@@ -1688,11 +1887,12 @@ audit <- tibble(SampleID = rownames(combined_qc),
                                     Detectability = suppressWarnings(as.numeric(Detectability)),
                                     QC_Status = `QC Status`),
             by = "SampleID") %>%
-  left_join(triage_df %>% select(SampleID, Reason, tri_IC, tri_PCA, tri_burden,
+  left_join(triage_df %>% select(SampleID, Reason, tri_low_reads, tri_IC, tri_PCA, tri_burden,
                                  tri_bad_data, n_axes), by = "SampleID") %>%
   left_join(burden_stat %>% select(SampleID, fdr_min, n_out), by = "SampleID") %>%
-  left_join(pca_df %>% select(SampleID = Sample, PC_z_round1 = PC_z), by = "SampleID") %>%
-  mutate(across(c(tri_IC, tri_PCA, tri_burden, tri_bad_data, High_Read_Plate, Low_Read,
+  left_join(pca_df %>% select(SampleID = Sample, PC_z_round1 = PC_z,
+                              PC_z_cohort, pca_cohort_flag, pca_masked_by_plate), by = "SampleID") %>%
+  mutate(across(c(tri_low_reads, tri_IC, tri_PCA, tri_burden, tri_bad_data, High_Read_Plate, Low_Read,
                   IC_Outlier), ~ tidyr::replace_na(., FALSE)),
          triaged      = SampleID %in% triage_df$SampleID,
          read_flagged = SampleID %in% read_outliers$SampleID,
@@ -2129,12 +2329,14 @@ collection site**, which needs the metadata merge.
 ```{r well-level-table, message=FALSE, warning=FALSE, echo=TRUE}
 well_qc <- audit %>%
   transmute(SampleID, Run, Bay, Well, wellRow, wellCol,
-            triaged, Reason, n_axes, tri_IC, tri_PCA, tri_burden, tri_bad_data,
+            triaged, Reason, n_axes, tri_low_reads, tri_IC, tri_PCA, tri_burden, tri_bad_data,
             read_flagged, High_Read_Plate, Low_Read,
             mean_INT, mean_INT_z, intensity_flag,
             Reads, IC_Reads, IC_ratio_to_plate_median = round(IC_Reads / Median_Value, 4),
             IC_Median, Detectability, QC_Status,
-            PC_z_round1 = round(PC_z_round1, 3), burden_fdr_min = fdr_min,
+            PC_z_round1 = round(PC_z_round1, 3),
+            PC_z_cohort = round(PC_z_cohort, 3), pca_cohort_flag, pca_masked_by_plate,
+            burden_fdr_min = fdr_min,
             burden_n_out = n_out) %>%
   arrange(Run, Bay, Well)
 
@@ -2156,11 +2358,20 @@ Here we add back in high-correlation biomarkers that were removed for the QC Bio
 # Add back high-correlated biomarkers to combined_qc_filtered
 library(tibble)
 
-# Ensure only rows in combined_qc_filtered are selected
-high_cor_subset <- combined_df[rownames(combined_qc_filtered), high_cor, drop = FALSE]
-
-# Add these columns to combined_qc_filtered
-combined_qc_full <- cbind(combined_qc_filtered, high_cor_subset)
+# Rebuild the post-QC biomarker set EXPLICITLY as `qc_pool` (changed 2026-09-01).
+#
+# This used to cbind `high_cor` onto whatever columns combined_qc_filtered happened to carry, which
+# was correct only while the anchors were guaranteed to be a subset of qc_pool. Since the WATCH-tier
+# fix an anchor may sit BELOW the 98% pool bar (kept for triage, flagged), and cbind would then
+# promote it out of the Low file and into the standard post-QC set — silently changing biomarker
+# CONTENT, which the frozen/rederive design guarantees is mode-invariant.
+#
+# Stating the content set directly removes that coupling: which markers reach the post-QC datasets is
+# `qc_pool` and nothing else, no matter what anchored the triage. Identical to the old result whenever
+# anchors are a subset of qc_pool, which is every pre-2026-09-01 run.
+combined_qc_full <- combined_df[rownames(combined_qc_filtered),
+                                c("Run", "Bay", qc_pool), drop = FALSE]
+stopifnot(setequal(setdiff(colnames(combined_qc_full), c("Run", "Bay")), qc_pool))
 # Move SampleIDs to first column
 combined_qc_full <- rownames_to_column(combined_qc_full, var = "SampleID")
 

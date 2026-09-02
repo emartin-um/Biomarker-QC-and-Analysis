@@ -90,10 +90,14 @@ perm_test <- function(label, stat_fun, n_perm = 10000L, seed = 1L) {
 triage_axes <- function(reason) {
   r <- as.character(reason); r[is.na(r)] <- ""
   data.frame(
-    IC      = grepl("IC outlier",                r, fixed = TRUE),
-    PCA     = grepl("PCA outlier",               r, fixed = TRUE),
-    burden  = grepl("High outlier burden (FDR)", r, fixed = TRUE),
-    baddata = grepl("Bad Data",                  r, fixed = TRUE),
+    # low_reads (added 2026-09-01) is the well-level read-depth screen: wells below the vendor's
+    # own Reads floor. It leads because it is the least ambiguous cause — a well that did not
+    # sequence has no usable signal, so any PCA/burden hit it also earns is a consequence.
+    low_reads = grepl("Low read depth",             r, fixed = TRUE),
+    IC        = grepl("IC outlier",                 r, fixed = TRUE),
+    PCA       = grepl("PCA outlier",                r, fixed = TRUE),
+    burden    = grepl("High outlier burden (FDR)",  r, fixed = TRUE),
+    baddata   = grepl("Bad Data",                   r, fixed = TRUE),
     stringsAsFactors = FALSE)
 }
 
